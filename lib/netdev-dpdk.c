@@ -1006,123 +1006,6 @@ dpdk_eth_flow_ctrl_setup(struct netdev_dpdk *dev) OVS_REQUIRES(dev->mutex)
     }
 }
 
-static void
-netdev_flow_isolate_rule(dpdk_port_t port_id)
-{
-    (void)port_id;
-#if RTE_VERSION >= RTE_VERSION_NUM(18, 8, 0, 16)
-    struct rte_flow_error error;
-
-    if (rte_flow_isolate(port_id, 1, &error)) {
-        VLOG_FATAL("port %u isolate open error, %s\n", port_id, error.message);
-    }
-#endif
-}
-
-static void
-netdev_flow_bifurcation(struct netdev_dpdk *dev, int port)
-{
-    (void)dev;
-    (void)port;
-#if RTE_VERSION >= RTE_VERSION_NUM(18, 8, 0, 16)
-    uint16_t queue[16];
-    struct rte_flow_error error;
-    struct rte_flow_attr attr;
-    struct rte_flow_item pattern[4];
-    struct rte_flow_action action[2];
-    struct rte_flow_action_rss rss;
-    struct rte_flow *flow = NULL;
-    struct rte_flow_item_eth eth_spec;
-    struct rte_flow_item_eth eth_mask;
-    struct rte_flow_item_ipv4 ip_spec;
-    struct rte_flow_item_ipv4 ip_mask;
-    struct rte_flow_item_udp udp_spec;
-    struct rte_flow_item_udp udp_mask;
-    int res;
-    unsigned i;
-
-    /*
-     * set the rule attribute.
-     * in this case only ingress packets will be checked.
-     */
-    memset(&attr, 0, sizeof(struct rte_flow_attr));
-    attr.ingress = 1;
-
-    /* init rx queue */
-    unsigned rx_queue = dev->up.n_rxq;
-    memset(queue, 0, sizeof(queue));
-    for (i = 0; i < rx_queue && i < 16; i++) {
-        queue[i] = i;
-    }
-
-    memset(&rss, 0, sizeof(struct rte_flow_action_rss));
-    rss.queue_num = i;
-    rss.queue = queue;
-    rss.level = 1;
-    rss.types = ETH_RSS_IP | ETH_RSS_UDP | ETH_RSS_TCP;
-
-    /*
-     * create the action sequence.
-     * one action only,  move packet to rss queue
-     */
-    memset(action, 0, sizeof(action));
-    action[0].type = RTE_FLOW_ACTION_TYPE_RSS;
-    action[0].conf = &rss;
-    action[1].type = RTE_FLOW_ACTION_TYPE_END;
-
-    /*
-     * setting the first level of the pattern (eth).
-     * we just want to get the ipv4 packet.
-     */
-    memset(pattern, 0, sizeof(pattern));
-    memset(&eth_spec, 0, sizeof(struct rte_flow_item_eth));
-    memset(&eth_mask, 0, sizeof(struct rte_flow_item_eth));
-    eth_spec.type = RTE_BE16(RTE_ETHER_TYPE_IPV4);
-    eth_mask.type = 0xffff;
-    pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
-    pattern[0].spec = &eth_spec;
-    pattern[0].mask = &eth_mask;
-
-    /*
-     * setting the second level of the pattern (ip).
-     * we just want to get the udp packet.
-     */
-    memset(&ip_spec, 0, sizeof(struct rte_flow_item_ipv4));
-    memset(&ip_mask, 0, sizeof(struct rte_flow_item_ipv4));
-    pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
-    ip_spec.hdr.next_proto_id = IPPROTO_UDP;
-    ip_mask.hdr.next_proto_id = 0xff;
-    pattern[1].spec = &ip_spec;
-    pattern[1].mask = &ip_mask;
-
-    /*
-     * setting the third level of the pattern (udp).
-     * we just want to get the dst port 4789 packet.
-     */
-    memset(&udp_spec, 0, sizeof(struct rte_flow_item_udp));
-    memset(&udp_mask, 0, sizeof(struct rte_flow_item_udp));
-    pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
-    udp_spec.hdr.dst_port = RTE_BE16(port);
-    udp_mask.hdr.dst_port = 0xffff;
-    pattern[2].spec = &udp_spec;
-    pattern[2].mask = &udp_mask;
-
-    /* the final level must be always type end */
-    pattern[3].type = RTE_FLOW_ITEM_TYPE_END;
-
-    memset(&error, 0, sizeof(error));
-    res = rte_flow_validate(dev->port_id, &attr, pattern, action, &error);
-    if (!res)
-        flow = rte_flow_create(dev->port_id, &attr, pattern, action, &error);
-
-    if (flow == NULL) {
-        VLOG_FATAL("port %u create flow bifurcation error, %s\n", dev->port_id, error.message);
-    }
-
-    netdev_flow_isolate_rule(dev->port_id);
-#endif
-}
-
 static int
 dpdk_eth_dev_init(struct netdev_dpdk *dev)
     OVS_REQUIRES(dev->mutex)
@@ -1174,16 +1057,6 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
         return -diag;
     }
 
-    bool flow_bifurcation_mode = false;
-    char *end = strstr(dev->devargs, "udpport=");
-    if (end) {
-        long int port = strtol(end + sizeof("udpport="), NULL, 10);
-        if (errno != ERANGE && errno != EINVAL) {
-            netdev_flow_bifurcation(dev, (int)port);
-            flow_bifurcation_mode = true;
-        }
-    }
-
     diag = rte_eth_dev_start(dev->port_id);
     if (diag) {
         VLOG_ERR("Interface %s start error: %s", dev->up.name,
@@ -1192,10 +1065,8 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
     }
     dev->started = true;
 
-    if (!flow_bifurcation_mode) {
-        rte_eth_promiscuous_enable(dev->port_id);
-        rte_eth_allmulticast_enable(dev->port_id);
-    }
+    rte_eth_promiscuous_enable(dev->port_id);
+    rte_eth_allmulticast_enable(dev->port_id);
 
     memset(&eth_addr, 0x0, sizeof(eth_addr));
     rte_eth_macaddr_get(dev->port_id, &eth_addr);
@@ -1787,14 +1658,8 @@ netdev_dpdk_get_port_by_mac(const char *mac_str)
     dpdk_port_t port_id;
     struct eth_addr mac, port_mac;
 
-    char *end = strchr(mac_str, ',');
-    if (end) {
-        *end = '\0';
-    }
     if (!eth_addr_from_string(mac_str, &mac)) {
         VLOG_ERR("invalid mac: %s", mac_str);
-        if (end)
-            *end = ',';
         return DPDK_ETH_PORT_ID_INVALID;
     }
 
@@ -1804,13 +1669,10 @@ netdev_dpdk_get_port_by_mac(const char *mac_str)
         rte_eth_macaddr_get(port_id, &ea);
         memcpy(port_mac.ea, ea.addr_bytes, ETH_ADDR_LEN);
         if (eth_addr_equals(mac, port_mac)) {
-            if (end)
-                *end = ',';
             return port_id;
         }
     }
-    if (end)
-        *end = ',';
+
     return DPDK_ETH_PORT_ID_INVALID;
 }
 
@@ -4277,7 +4139,6 @@ static const struct dpdk_qos_ops egress_policer_ops = {
     egress_policer_qos_is_equal,
     egress_policer_run
 };
-
 
 static int
 netdev_dpdk_reconfigure(struct netdev *netdev)
