@@ -5,7 +5,6 @@ if [[ $# < 1 ]];then
     exit -1
 fi
 
-ETH=$1
 
 pid=`pidof ovs-vswitchd`
 if [ -n "$pid" ]; then
@@ -40,32 +39,19 @@ fi
 have_br_int=`ovs-vsctl find Bridge name=br-int`
 have_br_ex=`ovs-vsctl find Bridge name=br-ex`
 
-if [[ -z "$have_br_int" ]];then
-    ovs-vsctl --no-wait add-br br-int -- set Bridge br-int datapath_type=netdev
-fi
-
-if [[ -z "$have_br_ex" ]];then
-    ovs-vsctl --no-wait add-br br-ex -- set Bridge br-ex datapath_type=netdev
-fi
-
-br_ex_datapath_type=`ovs-vsctl find Bridge name=br-ex | grep datapath_type | awk -F ' : ' '{print $2}'`
-if [[ "$br_ex_datapath_type" != "netdev" ]];then
-    ovs-vsctl --no-wait del-br br-ex
-    ovs-vsctl --no-wait add-br br-ex  -- set Bridge br-ex datapath_type=netdev
-fi
-
-br_int_datapath_type=`ovs-vsctl find Bridge name=br-int | grep datapath_type | awk -F ' : ' '{print $2}'`
-if [[ "$br_int_datapath_type" != "netdev" ]];then
+if [[ -n "$have_br_int" ]];then
     ovs-vsctl --no-wait del-br br-int
-    ovs-vsctl --no-wait add-br br-int -- set Bridge br-int datapath_type=netdev
 fi
 
-br_ex_has_eth=`ovs-vsctl list-ifaces br-ex | grep ${ETH}`
-if [[ -n "$br_ex_has_eth" ]];then
-    ovs-vsctl --no-wait del-port br-ex ${ETH}
+if [[ -n "$have_br_ex" ]];then
+    ovs-vsctl --no-wait del-br br-ex
 fi
 
+ovs-vsctl --no-wait add-br br-ex  -- set Bridge br-ex datapath_type=netdev
+ovs-vsctl --no-wait add-br br-int -- set Bridge br-int datapath_type=netdev
 
+ETH=$1
+ADDVFS=0
 DPDK_MEM=2048
 VF=16
 pci=`ethtool -i ${ETH} | grep bus-info | awk '{print $2}'`
@@ -103,8 +89,6 @@ if [[ $mode != "switchdev" ]]; then
     devlink dev eswitch set pci/$pci mode switchdev
 fi
 
-
-
 numa=`cat /sys/class/net/$ETH/device/numa_node`
 numanodes=`ls -dl /sys/devices/system/node/node* | wc -l`
 mem_array=(0 0 0 0 0 0 0 0)
@@ -121,13 +105,10 @@ cpu=`echo $cpu`
 
 echo "if:$ETH pci:$pci vf_num:$vfs ip:$ip numa:$numa cpu:$cpu"
 
-dpdk_init=`ovs-vsctl get Open_vSwitch . dpdk-init`
-if [[ $dpdk_init == "false" ]]; then
-    ovs-vsctl --no-wait set Open_vSwitch . \
-        other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
-        other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
-        other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem
-fi
+ovs-vsctl --no-wait set Open_vSwitch . \
+    other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
+    other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
+    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem
 
 #allocate 4G for dpdk
 echo "init hugepages"
@@ -146,11 +127,13 @@ echo "All VFs is:"
 VFs=`ls -d /sys/devices/virtual/net/eth*`
 for name in $VFs;do
     echo "Adding ${name##*/}"
-    has_if=`ovs-vsctl list-ifaces br-int | grep ${name##*/}`
-    if [[ -z "$has_if" ]];then
-        mac=`ip link show ${name##*/} | grep link/ether | awk '{print $2}'`
-        ovs-vsctl --no-wait add-port br-int ${name##*/} -- set Interface ${name##*/} \
-            type=dpdk options:dpdk-devargs="class=eth,mac=$mac" options:mtu_request=1550
+    if [[ $ADDVFS -ne 0 ]];then
+        has_if=`ovs-vsctl list-ifaces br-int | grep ${name##*/}`
+        if [[ -z "$has_if" ]];then
+            mac=`ip link show ${name##*/} | grep link/ether | awk '{print $2}'`
+            ovs-vsctl --no-wait add-port br-int ${name##*/} -- set Interface ${name##*/} \
+                type=dpdk options:dpdk-devargs="class=eth,mac=$mac" options:mtu_request=1550
+        fi
     fi
 done
 
