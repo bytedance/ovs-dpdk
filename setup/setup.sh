@@ -5,6 +5,8 @@ if [[ $# < 1 ]];then
     exit -1
 fi
 
+ETH=$1
+
 pid=`pidof ovs-vswitchd`
 if [ -n "$pid" ]; then
     ovs-appctl -t ovs-vswitchd exit
@@ -58,13 +60,12 @@ if [[ "$br_int_datapath_type" != "netdev" ]];then
     ovs-vsctl --no-wait add-br br-int -- set Bridge br-int datapath_type=netdev
 fi
 
-br_ex_has_eth=`ovs-vsctl list-ifaces br-ex`
-if [[ "$br_ex_has_eth" == "$ETH" ]];then
-    ovs-vsctl --no-wait del-port br-ex $ETH
+br_ex_has_eth=`ovs-vsctl list-ifaces br-ex | grep ${ETH}`
+if [[ -n "$br_ex_has_eth" ]];then
+    ovs-vsctl --no-wait del-port br-ex ${ETH}
 fi
 
 
-ETH=$1
 DPDK_MEM=2048
 VF=16
 pci=`ethtool -i ${ETH} | grep bus-info | awk '{print $2}'`
