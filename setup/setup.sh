@@ -55,8 +55,8 @@ ADDVFS=0
 DPDK_MEM=2048
 VF=16
 pci=`ethtool -i ${ETH} | grep bus-info | awk '{print $2}'`
-vfs=`cat /sys/class/net/${ETH}/device/sriov_numvfs`
 ip=`ip addr show eth2 | grep inet | grep -v inet6 | awk '{print $2}' | sed -ne 's|\/.*||p'`
+vfs=`cat /sys/class/net/${ETH}/device/sriov_numvfs`
 if [[ -z $ip ]]; then
     echo "get no ip, try ifup"
     ifup ${ETH}
@@ -102,7 +102,7 @@ socket_mem="$socket_mem""${mem_array[$(($numanodes-1))]}"
 echo "soket mem set to "$socket_mem
 cpu=`lscpu | grep "NUMA node$numa" | cut -d: -f2 | cut -d- -f1`
 cpu=`echo $cpu`
-
+vfs=`cat /sys/class/net/${ETH}/device/sriov_numvfs`
 echo "if:$ETH pci:$pci vf_num:$vfs ip:$ip numa:$numa cpu:$cpu"
 
 ovs-vsctl --no-wait set Open_vSwitch . \
