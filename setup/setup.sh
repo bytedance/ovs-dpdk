@@ -105,6 +105,12 @@ cpu=`echo $cpu`
 vfs=`cat /sys/class/net/${ETH}/device/sriov_numvfs`
 echo "if:$ETH pci:$pci vf_num:$vfs ip:$ip numa:$numa cpu:$cpu"
 
+echo "
+ovs-vsctl --no-wait set Open_vSwitch . \
+    other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
+    other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
+    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem
+"
 ovs-vsctl --no-wait set Open_vSwitch . \
     other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
     other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
@@ -120,7 +126,7 @@ ovs-vswitchd unix:/var/run/openvswitch/db.sock -vconsole:emer -vsyslog:err -vfil
 echo "Adding $ETH into br-ex"
 mac=`ip link show $ETH | grep link/ether | awk '{print $2}'`
 ovs-vsctl --no-wait add-port br-ex $ETH -- set Interface $ETH \
-        type=dpdk options:dpdk-devargs="class=eth,mac=$mac" options:mtu_request=1550
+        type=dpdk options:dpdk-devargs="class=eth,mac=$mac" mtu_request=1550
 
 
 echo "All VFs is:"
@@ -132,7 +138,7 @@ for name in $VFs;do
         if [[ -z "$has_if" ]];then
             mac=`ip link show ${name##*/} | grep link/ether | awk '{print $2}'`
             ovs-vsctl --no-wait add-port br-int ${name##*/} -- set Interface ${name##*/} \
-                type=dpdk options:dpdk-devargs="class=eth,mac=$mac" options:mtu_request=1550
+                type=dpdk options:dpdk-devargs="class=eth,mac=$mac" mtu_request=1550
         fi
     fi
 done

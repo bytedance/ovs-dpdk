@@ -46,7 +46,7 @@ name=`ls /sys/bus/pci/devices/$pci/net`
 echo "name=$name"
 
 ovs-vsctl --may-exist add-port br-int $ETH -- set Interface $ETH \
-                type=dpdk options:dpdk-devargs="class=eth,mac=$mac" options:mtu_request=1550
+                type=dpdk options:dpdk-devargs="class=eth,mac=$mac" mtu_request=1550
 ip netns add $ETH
 ip link set dev $name netns $ETH
 ip netns exec $ETH ifconfig $name up
