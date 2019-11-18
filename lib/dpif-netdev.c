@@ -526,7 +526,6 @@ struct dp_netdev_flow {
     struct ovs_refcount ref_cnt;
 
     bool dead;
-    uint32_t mark;               /* Unique flow mark assigned to a flow */
     bool actions_offloaded;      /* true if flow is fully offloaded */
 
     /* Statistics. */
@@ -2127,195 +2126,6 @@ dp_netdev_pmd_find_dpcls(struct dp_netdev_pmd_thread *pmd,
     return cls;
 }
 
-#define MAX_FLOW_MARK       (UINT32_MAX - 1)
-#define INVALID_FLOW_MARK   (UINT32_MAX)
-
-struct megaflow_to_mark_data {
-    const struct cmap_node node;
-    ovs_u128 mega_ufid;
-    uint32_t mark;
-};
-
-struct flow_mark {
-    struct cmap megaflow_to_mark;
-    struct cmap mark_to_flow;
-    struct id_pool *pool;
-};
-
-static struct flow_mark flow_mark = {
-    .megaflow_to_mark = CMAP_INITIALIZER,
-    .mark_to_flow = CMAP_INITIALIZER,
-};
-
-static uint32_t
-flow_mark_alloc(void)
-{
-    uint32_t mark;
-
-    if (!flow_mark.pool) {
-        /* Haven't initiated yet, do it here */
-        flow_mark.pool = id_pool_create(0, MAX_FLOW_MARK);
-    }
-
-    if (id_pool_alloc_id(flow_mark.pool, &mark)) {
-        return mark;
-    }
-
-    return INVALID_FLOW_MARK;
-}
-
-static void
-flow_mark_free(uint32_t mark)
-{
-    id_pool_free_id(flow_mark.pool, mark);
-}
-
-/* associate megaflow with a mark, which is a 1:1 mapping */
-static void
-megaflow_to_mark_associate(const ovs_u128 *mega_ufid, uint32_t mark)
-{
-    size_t hash = dp_netdev_flow_hash(mega_ufid);
-    struct megaflow_to_mark_data *data = xzalloc(sizeof(*data));
-
-    data->mega_ufid = *mega_ufid;
-    data->mark = mark;
-
-    cmap_insert(&flow_mark.megaflow_to_mark,
-                CONST_CAST(struct cmap_node *, &data->node), hash);
-}
-
-/* disassociate meagaflow with a mark */
-static void
-megaflow_to_mark_disassociate(const ovs_u128 *mega_ufid)
-{
-    size_t hash = dp_netdev_flow_hash(mega_ufid);
-    struct megaflow_to_mark_data *data;
-
-    CMAP_FOR_EACH_WITH_HASH (data, node, hash, &flow_mark.megaflow_to_mark) {
-        if (ovs_u128_equals(*mega_ufid, data->mega_ufid)) {
-            cmap_remove(&flow_mark.megaflow_to_mark,
-                        CONST_CAST(struct cmap_node *, &data->node), hash);
-            ovsrcu_postpone(free, data);
-            return;
-        }
-    }
-
-    VLOG_WARN("Masked ufid "UUID_FMT" is not associated with a mark?\n",
-              UUID_ARGS((struct uuid *)mega_ufid));
-}
-
-static inline uint32_t
-megaflow_to_mark_find(const ovs_u128 *mega_ufid)
-{
-    size_t hash = dp_netdev_flow_hash(mega_ufid);
-    struct megaflow_to_mark_data *data;
-
-    CMAP_FOR_EACH_WITH_HASH (data, node, hash, &flow_mark.megaflow_to_mark) {
-        if (ovs_u128_equals(*mega_ufid, data->mega_ufid)) {
-            return data->mark;
-        }
-    }
-
-    VLOG_DBG("Mark id for ufid "UUID_FMT" was not found\n",
-             UUID_ARGS((struct uuid *)mega_ufid));
-    return INVALID_FLOW_MARK;
-}
-
-/* associate mark with a flow, which is 1:N mapping */
-static void
-mark_to_flow_associate(const uint32_t mark, struct dp_netdev_flow *flow)
-{
-    dp_netdev_flow_ref(flow);
-
-    cmap_insert(&flow_mark.mark_to_flow,
-                CONST_CAST(struct cmap_node *, &flow->mark_node),
-                hash_int(mark, 0));
-    flow->mark = mark;
-
-    VLOG_DBG("Associated dp_netdev flow %p with mark %u\n", flow, mark);
-}
-
-static bool
-flow_mark_has_no_ref(uint32_t mark)
-{
-    struct dp_netdev_flow *flow;
-
-    CMAP_FOR_EACH_WITH_HASH (flow, mark_node, hash_int(mark, 0),
-                             &flow_mark.mark_to_flow) {
-        if (flow->mark == mark) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-static int
-mark_to_flow_disassociate(struct dp_netdev_pmd_thread *pmd,
-                          struct dp_netdev_flow *flow)
-{
-    int ret = 0;
-    uint32_t mark = flow->mark;
-    struct cmap_node *mark_node = CONST_CAST(struct cmap_node *,
-                                             &flow->mark_node);
-
-    cmap_remove(&flow_mark.mark_to_flow, mark_node, hash_int(mark, 0));
-    flow->mark = INVALID_FLOW_MARK;
-
-    /*
-     * no flow is referencing the mark any more? If so, let's
-     * remove the flow from hardware and free the mark.
-     */
-    if (flow_mark_has_no_ref(mark)) {
-        struct dp_netdev_port *port;
-        odp_port_t in_port = flow->flow.in_port.odp_port;
-
-        ovs_mutex_lock(&pmd->dp->port_mutex);
-        port = dp_netdev_lookup_port(pmd->dp, in_port);
-        if (port) {
-            ret = netdev_flow_del(port->netdev, &flow->mega_ufid, NULL);
-        }
-        ovs_mutex_unlock(&pmd->dp->port_mutex);
-
-        flow_mark_free(mark);
-        VLOG_DBG("Freed flow mark %u\n", mark);
-
-        megaflow_to_mark_disassociate(&flow->mega_ufid);
-    }
-    dp_netdev_flow_unref(flow);
-
-    return ret;
-}
-
-static void
-flow_mark_flush(struct dp_netdev_pmd_thread *pmd)
-{
-    struct dp_netdev_flow *flow;
-
-    CMAP_FOR_EACH (flow, mark_node, &flow_mark.mark_to_flow) {
-        if (flow->pmd_id == pmd->core_id) {
-            queue_netdev_flow_del(pmd, flow);
-        }
-    }
-}
-
-static struct dp_netdev_flow *
-mark_to_flow_find(const struct dp_netdev_pmd_thread *pmd,
-                  const uint32_t mark)
-{
-    struct dp_netdev_flow *flow;
-
-    CMAP_FOR_EACH_WITH_HASH (flow, mark_node, hash_int(mark, 0),
-                             &flow_mark.mark_to_flow) {
-        if (flow->mark == mark && flow->pmd_id == pmd->core_id &&
-            flow->dead == false) {
-            return flow;
-        }
-    }
-
-    return NULL;
-}
-
 static struct dp_flow_offload_item *
 dp_netdev_alloc_flow_offload(struct dp_netdev_pmd_thread *pmd,
                              struct dp_netdev_flow *flow,
@@ -2353,10 +2163,78 @@ dp_netdev_append_flow_offload(struct dp_flow_offload_item *offload)
     ovs_mutex_unlock(&dp_flow_offload.mutex);
 }
 
+
+static struct ovs_list tnl_in_port_list;
+struct tnl_in_port {
+    odp_port_t port_no;
+    struct netdev *dev;
+    struct ovs_list list;
+};
+
+static void
+tnl_in_port_add(odp_port_t port_no, struct netdev *dev)
+{
+    struct tnl_in_port *port = xzalloc(sizeof(struct tnl_in_port));
+    port->port_no = port_no;
+    port->dev = dev;
+    ovs_list_insert(&tnl_in_port_list, &port->list);
+}
+
+static struct tnl_in_port*
+tnl_in_port_find(odp_port_t port_no)
+{
+    struct tnl_in_port *port;
+    LIST_FOR_EACH(port, list, &tnl_in_port_list) {
+        if (port->port_no == port_no) {
+            return port;
+        }
+    }
+    return NULL;
+}
+
+static struct tnl_in_port *
+tnl_in_port_del(odp_port_t port_no)
+{
+    struct tnl_in_port *port, *next;
+    LIST_FOR_EACH_SAFE(port, next, list, &tnl_in_port_list) {
+        if (port->port_no == port_no) {
+            ovs_list_remove(&port->list);
+            return port;
+        }
+    }
+    return NULL;
+}
+
+static void
+tnl_in_port_flush(void)
+{
+    struct tnl_in_port *port, *next;
+    LIST_FOR_EACH_SAFE(port, next, list, &tnl_in_port_list) {
+        ovs_list_remove(&port->list);
+        free(port);
+    }
+}
+
 static int
 dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 {
-    return mark_to_flow_disassociate(offload->pmd, offload->flow);
+    return 0;
+}
+
+static bool
+dp_netdev_ofact_contain(const struct nlattr *actions, 
+                        size_t act_len, enum ovs_action_attr _type)
+{
+    const struct nlattr *a;
+    unsigned int left;
+
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, actions, act_len) {
+        int type = nl_attr_type(a);
+        if ((enum ovs_action_attr)type == _type) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /*
@@ -2378,52 +2256,41 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
     const struct dpif_class *dpif_class = pmd->dp->class;
     struct dp_netdev_flow *flow = offload->flow;
     odp_port_t in_port = flow->flow.in_port.odp_port;
-    bool modification = offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD;
     struct offload_info info;
-    uint32_t mark;
-    int ret;
+    int ret = 0;
 
     if (flow->dead) {
         return -1;
     }
 
-    if (modification) {
-        mark = flow->mark;
-        ovs_assert(mark != INVALID_FLOW_MARK);
-    } else {
-        /*
-         * If a mega flow has already been offloaded (from other PMD
-         * instances), do not offload it again.
-         */
-        mark = megaflow_to_mark_find(&flow->mega_ufid);
-        if (mark != INVALID_FLOW_MARK) {
-            VLOG_DBG("Flow has already been offloaded with mark %u\n", mark);
-            if (flow->mark != INVALID_FLOW_MARK) {
-                ovs_assert(flow->mark == mark);
-            } else {
-                mark_to_flow_associate(mark, flow);
-            }
-            return 0;
-        }
-
-        mark = flow_mark_alloc();
-        if (mark == INVALID_FLOW_MARK) {
-            VLOG_ERR("Failed to allocate flow mark!\n");
-        }
-    }
-    info.flow_mark = mark;
-    info.dpif_class = dpif_class;
-
     ovs_mutex_lock(&pmd->dp->port_mutex);
     port = dp_netdev_lookup_port(pmd->dp, in_port);
-    if (!port || netdev_vport_is_vport_class(port->netdev->netdev_class)) {
+    if (!port) {
         ovs_mutex_unlock(&pmd->dp->port_mutex);
         goto err_free;
     }
-    ret = netdev_flow_put(port->netdev, &offload->match,
-                          CONST_CAST(struct nlattr *, offload->actions),
-                          offload->actions_len, &flow->mega_ufid, &info,
-                          NULL);
+
+    if (dp_netdev_ofact_contain(offload->actions,
+                        offload->actions_len, OVS_ACTION_ATTR_TUNNEL_POP)) {
+        if (!tnl_in_port_find(in_port)) {
+            tnl_in_port_add(in_port, port->netdev);
+        }
+        /* by default not offload tnl_pop actions */
+        ovs_mutex_unlock(&pmd->dp->port_mutex);
+        goto ret;
+    }
+
+    if (netdev_vport_is_vport_class(port->netdev->netdev_class)) {
+        if (netdev_get_tunnel_config(port->netdev)) {
+            struct tnl_in_port *tnl_port;
+            LIST_FOR_EACH(tnl_port, list, &tnl_in_port_list) {
+                ret = netdev_flow_put(tnl_port->dev, &offload->match,
+                        CONST_CAST(struct nlattr *, offload->actions),
+                        offload->actions_len, &flow->mega_ufid, &info,
+                        NULL);
+            }
+        }
+    }
     ovs_mutex_unlock(&pmd->dp->port_mutex);
     flow->actions_offloaded = info.actions_offloaded;
 
@@ -2431,18 +2298,10 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
         goto err_free;
     }
 
-    if (!modification) {
-        megaflow_to_mark_associate(&flow->mega_ufid, mark);
-        mark_to_flow_associate(mark, flow);
-    }
+ret:
     return 0;
 
 err_free:
-    if (!modification) {
-        flow_mark_free(mark);
-    } else {
-        mark_to_flow_disassociate(pmd, flow);
-    }
     return -1;
 }
 
@@ -2453,6 +2312,8 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
     struct ovs_list *list;
     const char *op;
     int ret;
+
+    ovs_list_init(&tnl_in_port_list);
 
     for (;;) {
         ovs_mutex_lock(&dp_flow_offload.mutex);
@@ -2528,11 +2389,7 @@ queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
         ovsthread_once_done(&offload_thread_once);
     }
 
-    if (flow->mark != INVALID_FLOW_MARK) {
-        op = DP_NETDEV_FLOW_OFFLOAD_OP_MOD;
-    } else {
-        op = DP_NETDEV_FLOW_OFFLOAD_OP_ADD;
-    }
+    op = DP_NETDEV_FLOW_OFFLOAD_OP_MOD;
     offload = dp_netdev_alloc_flow_offload(pmd, flow, op);
     offload->match = *match;
     offload->actions = xmalloc(actions_len);
@@ -2555,9 +2412,6 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     ovs_assert(cls != NULL);
     dpcls_remove(cls, &flow->cr);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
-    if (flow->mark != INVALID_FLOW_MARK) {
-        queue_netdev_flow_del(pmd, flow);
-    }
     flow->dead = true;
 
     dp_netdev_flow_unref(flow);
@@ -3247,8 +3101,9 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     memset(&flow->stats, 0, sizeof flow->stats);
     flow->dead = false;
     flow->batch = NULL;
-    flow->mark = INVALID_FLOW_MARK;
+
     flow->actions_offloaded = false;
+
     *CONST_CAST(unsigned *, &flow->pmd_id) = pmd->core_id;
     *CONST_CAST(struct flow *, &flow->flow) = match->flow;
     *CONST_CAST(ovs_u128 *, &flow->ufid) = *ufid;
@@ -4700,7 +4555,6 @@ reload_affected_pmds(struct dp_netdev *dp)
 
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
         if (pmd->need_reload) {
-            flow_mark_flush(pmd);
             dp_netdev_reload_pmd__(pmd);
         }
     }
@@ -6535,7 +6389,6 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
 
     DP_PACKET_BATCH_REFILL_FOR_EACH (i, cnt, packet, packets_) {
         struct dp_netdev_flow *flow;
-        uint32_t mark;
 
         if (OVS_UNLIKELY(dp_packet_size(packet) < ETH_HEADER_LEN)) {
             dp_packet_delete(packet);
@@ -6551,26 +6404,6 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
 
         if (!md_is_valid) {
             pkt_metadata_init(&packet->md, port_no);
-        }
-
-        if ((*recirc_depth_get() == 0) &&
-            dp_packet_has_flow_mark(packet, &mark)) {
-            flow = mark_to_flow_find(pmd, mark);
-            if (OVS_LIKELY(flow)) {
-                tcp_flags = parse_tcp_flags(packet);
-                if (OVS_LIKELY(batch_enable)) {
-                    dp_netdev_queue_batches(packet, flow, tcp_flags, batches,
-                                            n_batches);
-                } else {
-                    /* Flow batching should be performed only after fast-path
-                     * processing is also completed for packets with emc miss
-                     * or else it will result in reordering of packets with
-                     * same datapath flows. */
-                    packet_enqueue_to_flow_map(packet, flow, tcp_flags,
-                                               flow_map, map_cnt++);
-                }
-                continue;
-            }
         }
 
         miniflow_extract(packet, &key->mf);
