@@ -114,7 +114,8 @@ ovs-vsctl --no-wait set Open_vSwitch . \
 ovs-vsctl --no-wait set Open_vSwitch . \
     other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
     other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
-    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem
+    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem \
+    other_config:hw-offload=true
 
 #allocate 4G for dpdk
 echo "init hugepages"
@@ -150,6 +151,4 @@ if [[ -z "$has_if" ]];then
         type=vxlan options:dst_port=4789 options:key=flow \
         options:local_ip=$ip options:remote_ip=flow options:tos=inherit
 fi
-
-
 
