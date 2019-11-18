@@ -49,7 +49,7 @@ ovs-vsctl --may-exist add-port br-int $ETH -- set Interface $ETH \
                 type=dpdk options:dpdk-devargs="class=eth,mac=$mac" mtu_request=1550
 ip netns add $ETH
 ip link set dev $name netns $ETH
-ip netns exec $ETH ifconfig $name up
-ip netns exec $ETH ifconfig lo up
+ip netns exec $ETH ip link set dev $name up
+ip netns exec $ETH ip link set dev lo up
 
 
