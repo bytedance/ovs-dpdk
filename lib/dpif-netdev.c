@@ -2523,7 +2523,7 @@ queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
 
     if (ovsthread_once_start(&offload_thread_once)) {
         xpthread_cond_init(&dp_flow_offload.cond, NULL);
-        ovs_thread_create("dp_netdev_flow_offload",
+        ovs_thread_create("hw_offload",
                           dp_netdev_flow_offload_main, NULL);
         ovsthread_once_done(&offload_thread_once);
     }
