@@ -47,6 +47,9 @@ netdev_dpdk_rte_flow_create(struct netdev *netdev,
                             const struct rte_flow_item *items,
                             const struct rte_flow_action *actions,
                             struct rte_flow_error *error);
+int
+netdev_dpdk_rte_flow_flush(struct netdev *netdev,
+                           struct rte_flow_error *error);
 
 #else
 
