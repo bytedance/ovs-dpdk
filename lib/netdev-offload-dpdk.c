@@ -302,6 +302,21 @@ netdev_offload_dpdk_flow_del(struct netdev *netdev, const ovs_u128 *ufid,
 }
 
 static int
+netdev_offload_dpdk_flow_flush(struct netdev *netdev)
+{
+    struct rte_flow_error error;
+    int ret;
+
+    ret = netdev_dpdk_rte_flow_flush(netdev, &error);
+    if (ret) {
+        VLOG_ERR("%s: rte flow flush error: %u : message : %s\n",
+                 netdev_get_name(netdev), error.type, error.message);
+    }
+
+    return ret;
+}
+
+static int
 netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
 {
     return netdev_dpdk_flow_api_supported(netdev) ? 0 : EOPNOTSUPP;
@@ -309,6 +324,7 @@ netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
 
 const struct netdev_flow_api netdev_offload_dpdk = {
     .type = "dpdk_flow_api",
+    .flow_flush = netdev_offload_dpdk_flow_flush,
     .flow_put = netdev_offload_dpdk_flow_put,
     .flow_del = netdev_offload_dpdk_flow_del,
     .init_flow_api = netdev_offload_dpdk_init_flow_api,
