@@ -337,6 +337,20 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Set-ttl = null\n");
         }
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_RAW_ENCAP) {
+        const struct rte_flow_action_raw_encap *raw_encap = actions->conf;
+
+        ds_put_cstr(s, "rte flow raw-encap action:\n");
+        if (raw_encap) {
+            ds_put_format(s,
+                          "  Raw-encap: size=%ld\n",
+                          raw_encap->size);
+            ds_put_format(s,
+                          "  Raw-encap: encap=\n");
+            ds_put_hex_dump(s, raw_encap->data, raw_encap->size, 0, false);
+        } else {
+            ds_put_cstr(s, "  Raw-encap = null\n");
+        }
     } else {
         ds_put_format(s, "unknown rte flow action (%d)\n", actions->type);
     }
@@ -767,6 +781,44 @@ netdev_dpdk_flow_add_set_actions(struct flow_actions *actions,
     return 0;
 }
 
+static int
+netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
+                                   const struct nlattr *clone_actions,
+                                   const size_t clone_actions_len,
+                                   struct offload_info *info)
+{
+    const struct nlattr *ca;
+    unsigned int cleft;
+
+    NL_ATTR_FOR_EACH_UNSAFE (ca, cleft, clone_actions, clone_actions_len) {
+        int clone_type = nl_attr_type(ca);
+
+        if (clone_type == OVS_ACTION_ATTR_TUNNEL_PUSH) {
+            const struct ovs_action_push_tnl *tnl_push = nl_attr_get(ca);
+            struct rte_flow_action_raw_encap *raw_encap =
+                xzalloc(sizeof *raw_encap);
+
+            raw_encap->data = (uint8_t *)tnl_push->header;
+            raw_encap->preserve = NULL;
+            raw_encap->size = tnl_push->header_len;
+
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_ENCAP,
+                            raw_encap);
+        } else if (clone_type == OVS_ACTION_ATTR_OUTPUT &&
+                   cleft <= NLA_ALIGN(ca->nla_len)) {
+            if (netdev_dpdk_flow_add_output_action(actions, ca, info)) {
+                return -1;
+            }
+        } else {
+            VLOG_DBG_RL(&error_rl,
+                        "Unsupported clone action. clone_type=%d", clone_type);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int
 netdev_dpdk_flow_actions_add(struct flow_actions *actions,
                              struct nlattr *nl_actions,
@@ -790,6 +842,14 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
 
             if (netdev_dpdk_flow_add_set_actions(actions, set_actions,
                                                  set_actions_len, masked)) {
+                return -1;
+            }
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_CLONE) {
+            const struct nlattr *clone_actions = nl_attr_get(nla);
+            size_t clone_actions_len = nl_attr_get_size(nla);
+
+            if (netdev_dpdk_flow_add_clone_actions(actions, clone_actions,
+                                                   clone_actions_len, info)) {
                 return -1;
             }
         } else {
