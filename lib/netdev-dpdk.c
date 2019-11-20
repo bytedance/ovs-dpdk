@@ -4407,6 +4407,31 @@ netdev_dpdk_rte_flow_create(struct netdev *netdev,
 }
 
 int
+netdev_dpdk_rte_flow_query(struct netdev *netdev,
+                           struct rte_flow *rte_flow,
+                           struct rte_flow_query_count *query,
+                           struct rte_flow_error *error)
+{
+    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    struct rte_flow_action_count count = {};
+    const struct rte_flow_action actions[] = {
+        {
+            .type = RTE_FLOW_ACTION_TYPE_COUNT,
+            .conf = &count,
+        },
+        {
+            .type = RTE_FLOW_ACTION_TYPE_END,
+        },
+    };
+    int ret;
+
+    ovs_mutex_lock(&dev->mutex);
+    ret = rte_flow_query(dev->port_id, rte_flow, actions, query, error);
+    ovs_mutex_unlock(&dev->mutex);
+    return ret;
+}
+
+int
 netdev_dpdk_rte_flow_flush(struct netdev *netdev,
                            struct rte_flow_error *error)
 {
