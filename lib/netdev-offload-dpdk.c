@@ -329,6 +329,36 @@ netdev_offload_dpdk_flow_flush(struct netdev *netdev)
 }
 
 static int
+netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
+                                   const ovs_u128 *ufid,
+                                   struct dpif_flow_stats *stats)
+{
+    struct rte_flow_query_count query = { .reset = 1 };
+    struct rte_flow_error error;
+    struct rte_flow *rte_flow;
+    int ret;
+
+    rte_flow = ufid_to_rte_flow_find(ufid);
+    if (!rte_flow) {
+        return -1;
+    }
+
+    memset(stats, 0, sizeof *stats);
+    ret = netdev_dpdk_rte_flow_query(netdev, rte_flow, &query, &error);
+    if (ret) {
+        VLOG_DBG("ufid "UUID_FMT
+                 " flow %p query for '%s' failed\n",
+                 UUID_ARGS((struct uuid *)ufid), rte_flow,
+                 netdev_get_name(netdev));
+        return -1;
+    }
+    stats->n_packets += (query.hits_set) ? query.hits : 0;
+    stats->n_bytes += (query.bytes_set) ? query.bytes : 0;
+
+    return 0;
+}
+
+static int
 netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
 {
     return netdev_dpdk_flow_api_supported(netdev) ? 0 : EOPNOTSUPP;
@@ -339,5 +369,6 @@ const struct netdev_flow_api netdev_offload_dpdk = {
     .flow_flush = netdev_offload_dpdk_flow_flush,
     .flow_put = netdev_offload_dpdk_flow_put,
     .flow_del = netdev_offload_dpdk_flow_del,
+    .flow_stats_get = netdev_offload_dpdk_flow_stats_get,
     .init_flow_api = netdev_offload_dpdk_init_flow_api,
 };
