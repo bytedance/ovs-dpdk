@@ -150,7 +150,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
                                        actions.actions, &error);
 
     if (!flow) {
-        VLOG_ERR("%s: rte flow creat error: %u : message : %s\n",
+        VLOG_ERR("%s: rte flow create error: %u : message : %s\n",
                  netdev_get_name(netdev), error.type, error.message);
         ret = -1;
         goto out;
