@@ -351,6 +351,20 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Raw-encap = null\n");
         }
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_SRC ||
+               actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_DST) {
+        const struct rte_flow_action_set_tp *set_tp = actions->conf;
+        char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_DST
+                       ? "dst" : "src";
+
+        ds_put_format(s, "rte flow set-tcp/udp-port-%s action:\n", dirstr);
+        if (set_tp) {
+            ds_put_format(s,
+                          "  Set-%s-tcp/udp-port: %"PRIu16"\n",
+                          dirstr, ntohs(set_tp->port));
+        } else {
+            ds_put_format(s, "  Set-%s-tcp/udp-port = null\n", dirstr);
+        }
     } else {
         ds_put_format(s, "unknown rte flow action (%d)\n", actions->type);
     }
@@ -766,6 +780,40 @@ netdev_dpdk_flow_add_set_actions(struct flow_actions *actions,
                 VLOG_DBG_RL(&error_rl, "Unsupported IPv4 set action");
                 return -1;
             }
+
+            if (add_set_flow_action(actions, sa_info_arr,
+                                    ARRAY_SIZE(sa_info_arr))) {
+                return -1;
+            }
+        } else if (nl_attr_type(sa) == OVS_KEY_ATTR_TCP) {
+            const struct ovs_key_tcp *key = nl_attr_get(sa);
+            const struct ovs_key_tcp *mask = masked ?
+                get_mask(sa, struct ovs_key_tcp) : NULL;
+            struct rte_flow_action_set_tp *src = xzalloc(sizeof *src);
+            struct rte_flow_action_set_tp *dst = xzalloc(sizeof *dst);
+            struct set_action_info sa_info_arr[] = {
+                SA_INFO(tcp_src, src->port,
+                        RTE_FLOW_ACTION_TYPE_SET_TP_SRC),
+                SA_INFO(tcp_dst, dst->port,
+                        RTE_FLOW_ACTION_TYPE_SET_TP_DST),
+            };
+
+            if (add_set_flow_action(actions, sa_info_arr,
+                                    ARRAY_SIZE(sa_info_arr))) {
+                return -1;
+            }
+        } else if (nl_attr_type(sa) == OVS_KEY_ATTR_UDP) {
+            const struct ovs_key_udp *key = nl_attr_get(sa);
+            const struct ovs_key_udp *mask = masked ?
+                get_mask(sa, struct ovs_key_udp) : NULL;
+            struct rte_flow_action_set_tp *src = xzalloc(sizeof *src);
+            struct rte_flow_action_set_tp *dst = xzalloc(sizeof *dst);
+            struct set_action_info sa_info_arr[] = {
+                SA_INFO(udp_src, src->port,
+                        RTE_FLOW_ACTION_TYPE_SET_TP_SRC),
+                SA_INFO(udp_dst, dst->port,
+                        RTE_FLOW_ACTION_TYPE_SET_TP_DST),
+            };
 
             if (add_set_flow_action(actions, sa_info_arr,
                                     ARRAY_SIZE(sa_info_arr))) {
