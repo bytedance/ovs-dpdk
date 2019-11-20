@@ -313,6 +313,30 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_format(s, "  Set-mac-%s = null\n", dirstr);
         }
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC ||
+               actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_DST) {
+        const struct rte_flow_action_set_ipv4 *set_ipv4 = actions->conf;
+        char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_DST
+                       ? "dst" : "src";
+
+        ds_put_format(s, "rte flow set-ipv4-%s action:\n", dirstr);
+        if (set_ipv4) {
+            ds_put_format(s,
+                          "  Set-ipv4-%s: "IP_FMT"\n",
+                          dirstr, IP_ARGS(set_ipv4->ipv4_addr));
+        } else {
+            ds_put_format(s, "  Set-ipv4-%s = null\n", dirstr);
+        }
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_TTL) {
+        const struct rte_flow_action_set_ttl *set_ttl = actions->conf;
+
+        ds_put_cstr(s, "rte flow set-ttl action:\n");
+        if (set_ttl) {
+            ds_put_format(s,
+                          "  Set-ttl: %d\n", set_ttl->ttl_value);
+        } else {
+            ds_put_cstr(s, "  Set-ttl = null\n");
+        }
     } else {
         ds_put_format(s, "unknown rte flow action (%d)\n", actions->type);
     }
@@ -702,6 +726,32 @@ netdev_dpdk_flow_add_set_actions(struct flow_actions *actions,
                 SA_INFO(eth_dst, dst->mac_addr[0],
                         RTE_FLOW_ACTION_TYPE_SET_MAC_DST),
             };
+
+            if (add_set_flow_action(actions, sa_info_arr,
+                                    ARRAY_SIZE(sa_info_arr))) {
+                return -1;
+            }
+        } else if (nl_attr_type(sa) == OVS_KEY_ATTR_IPV4) {
+            const struct ovs_key_ipv4 *key = nl_attr_get(sa);
+            const struct ovs_key_ipv4 *mask = masked ?
+                get_mask(sa, struct ovs_key_ipv4) : NULL;
+            struct rte_flow_action_set_ipv4 *src = xzalloc(sizeof *src);
+            struct rte_flow_action_set_ipv4 *dst = xzalloc(sizeof *dst);
+            struct rte_flow_action_set_ttl *ttl = xzalloc(sizeof *ttl);
+            struct set_action_info sa_info_arr[] = {
+                SA_INFO(ipv4_src, src->ipv4_addr,
+                        RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC),
+                SA_INFO(ipv4_dst, dst->ipv4_addr,
+                        RTE_FLOW_ACTION_TYPE_SET_IPV4_DST),
+                SA_INFO(ipv4_ttl, ttl->ttl_value,
+                        RTE_FLOW_ACTION_TYPE_SET_TTL),
+            };
+
+            if (mask && (mask->ipv4_proto || mask->ipv4_tos ||
+                mask->ipv4_frag)) {
+                VLOG_DBG_RL(&error_rl, "Unsupported IPv4 set action");
+                return -1;
+            }
 
             if (add_set_flow_action(actions, sa_info_arr,
                                     ARRAY_SIZE(sa_info_arr))) {
