@@ -298,6 +298,21 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         }
     } else if (actions->type == RTE_FLOW_ACTION_TYPE_DROP) {
         ds_put_cstr(s, "rte flow drop action\n");
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_SRC ||
+               actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_DST) {
+        const struct rte_flow_action_set_mac *set_mac = actions->conf;
+
+        char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_DST
+                       ? "dst" : "src";
+
+        ds_put_format(s, "rte flow set-mac-%s action:\n", dirstr);
+        if (set_mac) {
+            ds_put_format(s,
+                          "  Set-mac-%s: "ETH_ADDR_FMT"\n",
+                          dirstr, ETH_ADDR_BYTES_ARGS(set_mac->mac_addr));
+        } else {
+            ds_put_format(s, "  Set-mac-%s = null\n", dirstr);
+        }
     } else {
         ds_put_format(s, "unknown rte flow action (%d)\n", actions->type);
     }
@@ -605,6 +620,103 @@ netdev_dpdk_flow_add_output_action(struct flow_actions *actions,
     return 0;
 }
 
+struct set_action_info {
+    const uint8_t *value, *mask;
+    const uint8_t size;
+    uint8_t *spec;
+    const int attr;
+};
+
+static int
+add_set_flow_action(struct flow_actions *actions,
+                    struct set_action_info *sa_info_arr,
+                    size_t sa_info_arr_size)
+{
+    int field, i;
+
+    for (field = 0; field < sa_info_arr_size; field++) {
+        if (sa_info_arr[field].mask) {
+            /* DPDK does not support partially masked set actions. In such
+             * case, fail the offload.
+             */
+            if (sa_info_arr[field].mask[0] != 0x00 &&
+                sa_info_arr[field].mask[0] != 0xFF) {
+                VLOG_DBG_RL(&error_rl,
+                            "Partial mask is not supported");
+                return -1;
+            }
+
+            for (i = 1; i < sa_info_arr[field].size; i++) {
+                if (sa_info_arr[field].mask[i] !=
+                    sa_info_arr[field].mask[i - 1]) {
+                    VLOG_DBG_RL(&error_rl,
+                                "Partial mask is not supported");
+                    return -1;
+                }
+            }
+
+            if (sa_info_arr[field].mask[0] == 0x00) {
+                /* mask bytes are all 0 - no rewrite action required */
+                continue;
+            }
+        }
+
+        memcpy(sa_info_arr[field].spec, sa_info_arr[field].value,
+               sa_info_arr[field].size);
+        add_flow_action(actions, sa_info_arr[field].attr,
+                        sa_info_arr[field].spec);
+    }
+
+    return 0;
+}
+
+/* Mask is at the midpoint of the data. */
+#define get_mask(a, type) ((const type *)(const void *)(a + 1) + 1)
+
+#define SA_INFO(_field, _spec, _attr) { \
+    .value = (uint8_t *)&key->_field, \
+    .mask = (masked) ? (uint8_t *)&mask->_field : NULL, \
+    .size = sizeof key->_field, \
+    .spec = (uint8_t *)&_spec, \
+    .attr = _attr }
+
+static int
+netdev_dpdk_flow_add_set_actions(struct flow_actions *actions,
+                                 const struct nlattr *set_actions,
+                                 const size_t set_actions_len,
+                                 bool masked)
+{
+    const struct nlattr *sa;
+    unsigned int sleft;
+
+    NL_ATTR_FOR_EACH_UNSAFE (sa, sleft, set_actions, set_actions_len) {
+        if (nl_attr_type(sa) == OVS_KEY_ATTR_ETHERNET) {
+            const struct ovs_key_ethernet *key = nl_attr_get(sa);
+            const struct ovs_key_ethernet *mask = masked ?
+                get_mask(sa, struct ovs_key_ethernet) : NULL;
+            struct rte_flow_action_set_mac *src = xzalloc(sizeof *src);
+            struct rte_flow_action_set_mac *dst = xzalloc(sizeof *dst);
+            struct set_action_info sa_info_arr[] = {
+                SA_INFO(eth_src, src->mac_addr[0],
+                        RTE_FLOW_ACTION_TYPE_SET_MAC_SRC),
+                SA_INFO(eth_dst, dst->mac_addr[0],
+                        RTE_FLOW_ACTION_TYPE_SET_MAC_DST),
+            };
+
+            if (add_set_flow_action(actions, sa_info_arr,
+                                    ARRAY_SIZE(sa_info_arr))) {
+                return -1;
+            }
+        } else {
+            VLOG_DBG_RL(&error_rl,
+                        "Unsupported set action type=%d", nl_attr_type(sa));
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int
 netdev_dpdk_flow_actions_add(struct flow_actions *actions,
                              struct nlattr *nl_actions,
@@ -618,6 +730,16 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
         if (nl_attr_type(nla) == OVS_ACTION_ATTR_OUTPUT &&
             left <= NLA_ALIGN(nla->nla_len)) {
             if (netdev_dpdk_flow_add_output_action(actions, nla, info )) {
+                return -1;
+            }
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_SET ||
+                   nl_attr_type(nla) == OVS_ACTION_ATTR_SET_MASKED) {
+            const struct nlattr *set_actions = nl_attr_get(nla);
+            const size_t set_actions_len = nl_attr_get_size(nla);
+            bool masked = nl_attr_type(nla) == OVS_ACTION_ATTR_SET_MASKED;
+
+            if (netdev_dpdk_flow_add_set_actions(actions, set_actions,
+                                                 set_actions_len, masked)) {
                 return -1;
             }
         } else {

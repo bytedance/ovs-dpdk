@@ -11,7 +11,7 @@ Post-v2.12.0
      * Add option to enable, disable and query TCP sequence checking in
        conntrack.
    - DPDK:
-     * Add hardware offload support for output and drop actions.
+     * Add hardware offload support for output, drop and set MAC actions.
 
 v2.12.0 - 03 Sep 2019
 ---------------------
