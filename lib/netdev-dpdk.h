@@ -56,6 +56,8 @@ netdev_dpdk_rte_flow_query(struct netdev *netdev,
                            struct rte_flow *rte_flow,
                            struct rte_flow_query_count *query,
                            struct rte_flow_error *error);
+int
+netdev_dpdk_get_port_id(const struct netdev *netdev);
 
 #else
 
