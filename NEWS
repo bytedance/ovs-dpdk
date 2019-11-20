@@ -10,6 +10,8 @@ Post-v2.12.0
        if supported by libbpf.
      * Add option to enable, disable and query TCP sequence checking in
        conntrack.
+   - DPDK:
+     * Add hardware offload support for output actions.
 
 v2.12.0 - 03 Sep 2019
 ---------------------
