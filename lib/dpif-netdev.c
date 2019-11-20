@@ -2375,6 +2375,7 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
 {
     struct dp_netdev_port *port;
     struct dp_netdev_pmd_thread *pmd = offload->pmd;
+    const struct dpif_class *dpif_class = pmd->dp->class;
     struct dp_netdev_flow *flow = offload->flow;
     odp_port_t in_port = flow->flow.in_port.odp_port;
     bool modification = offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD;
@@ -2411,6 +2412,7 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
         }
     }
     info.flow_mark = mark;
+    info.dpif_class = dpif_class;
 
     ovs_mutex_lock(&pmd->dp->port_mutex);
     port = dp_netdev_lookup_port(pmd->dp, in_port);
