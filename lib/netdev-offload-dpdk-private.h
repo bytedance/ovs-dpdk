@@ -40,24 +40,10 @@ struct flow_actions {
     int current_max;
 };
 
-struct flow_pattern_items {
-    struct rte_flow_item_eth  eth;
-    struct rte_flow_item_vlan vlan;
-    struct rte_flow_item_ipv4 ipv4;
-    union {
-        struct rte_flow_item_tcp  tcp;
-        struct rte_flow_item_udp  udp;
-        struct rte_flow_item_sctp sctp;
-        struct rte_flow_item_icmp icmp;
-    };
-};
-
 void
 netdev_dpdk_flow_patterns_free(struct flow_patterns *patterns);
 int
 netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
-                              struct flow_pattern_items *spec,
-                              struct flow_pattern_items *mask,
                               const struct match *match);
 void
 netdev_dpdk_flow_actions_free(struct flow_actions *actions);

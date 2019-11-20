@@ -131,15 +131,11 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
     };
     struct flow_patterns patterns = { .items = NULL, .cnt = 0 };
     struct flow_actions actions = { .actions = NULL, .cnt = 0 };
-    struct flow_pattern_items spec, mask;
     struct rte_flow_error error;
     struct rte_flow *flow;
     int ret = 0;
 
-    memset(&spec, 0, sizeof spec);
-    memset(&mask, 0, sizeof mask);
-
-    ret = netdev_dpdk_flow_patterns_add(&patterns, &spec, &mask, match);
+    ret = netdev_dpdk_flow_patterns_add(&patterns, match);
     if (ret) {
         VLOG_WARN("Adding rte match patterns for flow ufid"UUID_FMT" failed",
                   UUID_ARGS((struct uuid *)ufid));
