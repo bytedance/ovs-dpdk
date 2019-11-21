@@ -399,7 +399,6 @@ lib_libopenvswitch_la_SOURCES += \
 	lib/netdev-linux.c \
 	lib/netdev-linux.h \
 	lib/netdev-linux-private.h \
-	lib/netdev-offload-tc.c \
 	lib/netlink-conntrack.c \
 	lib/netlink-conntrack.h \
 	lib/netlink-notifier.c \

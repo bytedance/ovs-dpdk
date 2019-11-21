@@ -50,6 +50,7 @@
 #include "id-pool.h"
 #include "ipf.h"
 #include "netdev.h"
+#include "netdev-dpdk.h"
 #include "netdev-offload.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
@@ -2163,78 +2164,26 @@ dp_netdev_append_flow_offload(struct dp_flow_offload_item *offload)
     ovs_mutex_unlock(&dp_flow_offload.mutex);
 }
 
-
-static struct ovs_list tnl_in_port_list;
-struct tnl_in_port {
-    odp_port_t port_no;
-    struct netdev *dev;
-    struct ovs_list list;
-};
-
-static void
-tnl_in_port_add(odp_port_t port_no, struct netdev *dev)
-{
-    struct tnl_in_port *port = xzalloc(sizeof(struct tnl_in_port));
-    port->port_no = port_no;
-    port->dev = dev;
-    ovs_list_insert(&tnl_in_port_list, &port->list);
-}
-
-static struct tnl_in_port*
-tnl_in_port_find(odp_port_t port_no)
-{
-    struct tnl_in_port *port;
-    LIST_FOR_EACH(port, list, &tnl_in_port_list) {
-        if (port->port_no == port_no) {
-            return port;
-        }
-    }
-    return NULL;
-}
-
-static struct tnl_in_port *
-tnl_in_port_del(odp_port_t port_no)
-{
-    struct tnl_in_port *port, *next;
-    LIST_FOR_EACH_SAFE(port, next, list, &tnl_in_port_list) {
-        if (port->port_no == port_no) {
-            ovs_list_remove(&port->list);
-            return port;
-        }
-    }
-    return NULL;
-}
-
-static void
-tnl_in_port_flush(void)
-{
-    struct tnl_in_port *port, *next;
-    LIST_FOR_EACH_SAFE(port, next, list, &tnl_in_port_list) {
-        ovs_list_remove(&port->list);
-        free(port);
-    }
-}
-
 static int
 dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 {
-    return 0;
-}
+    struct dp_netdev_port *port;
+    struct dp_netdev_flow *flow = offload->flow;
+    odp_port_t in_port = flow->flow.in_port.odp_port;
+    struct dp_netdev_pmd_thread *pmd = offload->pmd;
+    int ret = -1;
 
-static bool
-dp_netdev_ofact_contain(const struct nlattr *actions, 
-                        size_t act_len, enum ovs_action_attr _type)
-{
-    const struct nlattr *a;
-    unsigned int left;
-
-    NL_ATTR_FOR_EACH_UNSAFE (a, left, actions, act_len) {
-        int type = nl_attr_type(a);
-        if ((enum ovs_action_attr)type == _type) {
-            return true;
-        }
+    ovs_mutex_lock(&pmd->dp->port_mutex);
+    port = dp_netdev_lookup_port(pmd->dp, in_port);
+    if (port) {
+        ret = netdev_flow_del(port->netdev, &flow->mega_ufid, NULL);
     }
-    return false;
+    ovs_mutex_unlock(&pmd->dp->port_mutex);
+    if (ret) {
+        return -1;
+    }
+    dp_netdev_flow_unref(flow);
+    return 0;
 }
 
 /*
@@ -2263,46 +2212,28 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
         return -1;
     }
 
+    info.dpif_class = dpif_class;
+
     ovs_mutex_lock(&pmd->dp->port_mutex);
     port = dp_netdev_lookup_port(pmd->dp, in_port);
     if (!port) {
         ovs_mutex_unlock(&pmd->dp->port_mutex);
-        goto err_free;
+        return -1;
     }
 
-    if (dp_netdev_ofact_contain(offload->actions,
-                        offload->actions_len, OVS_ACTION_ATTR_TUNNEL_POP)) {
-        if (!tnl_in_port_find(in_port)) {
-            tnl_in_port_add(in_port, port->netdev);
-        }
-        /* by default not offload tnl_pop actions */
-        ovs_mutex_unlock(&pmd->dp->port_mutex);
-        goto ret;
-    }
-
-    if (netdev_vport_is_vport_class(port->netdev->netdev_class)) {
-        if (netdev_get_tunnel_config(port->netdev)) {
-            struct tnl_in_port *tnl_port;
-            LIST_FOR_EACH(tnl_port, list, &tnl_in_port_list) {
-                ret = netdev_flow_put(tnl_port->dev, &offload->match,
-                        CONST_CAST(struct nlattr *, offload->actions),
-                        offload->actions_len, &flow->mega_ufid, &info,
-                        NULL);
-            }
-        }
-    }
+    ret = netdev_flow_put(port->netdev, &offload->match,
+            CONST_CAST(struct nlattr *, offload->actions),
+            offload->actions_len, &flow->mega_ufid, &info,
+            NULL);
     ovs_mutex_unlock(&pmd->dp->port_mutex);
     flow->actions_offloaded = info.actions_offloaded;
 
     if (ret) {
-        goto err_free;
+        return -1;
     }
+    dp_netdev_flow_ref(flow);
 
-ret:
     return 0;
-
-err_free:
-    return -1;
 }
 
 static void *
@@ -2312,8 +2243,6 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
     struct ovs_list *list;
     const char *op;
     int ret;
-
-    ovs_list_init(&tnl_in_port_list);
 
     for (;;) {
         ovs_mutex_lock(&dp_flow_offload.mutex);
@@ -2346,6 +2275,7 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
 
         VLOG_DBG("%s to %s netdev flow\n",
                  ret == 0 ? "succeed" : "failed", op);
+
         dp_netdev_free_flow_offload(offload);
     }
 
@@ -2412,6 +2342,9 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     ovs_assert(cls != NULL);
     dpcls_remove(cls, &flow->cr);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
+    if (flow->actions_offloaded) {
+        queue_netdev_flow_del(pmd, flow);
+    }
     flow->dead = true;
 
     dp_netdev_flow_unref(flow);

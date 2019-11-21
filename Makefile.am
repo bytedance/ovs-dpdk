@@ -93,7 +93,12 @@ EXTRA_DIST = \
 	Vagrantfile \
 	Vagrantfile-FreeBSD \
 	.mailmap \
-	setup/setup.sh
+	setup/setup.sh \
+	setup/clear_kernel_if.sh \
+	setup/vs-add.sh \
+	setup/vs-del.sh \
+	lib/netdev-offload-tc.c
+
 bin_PROGRAMS =
 sbin_PROGRAMS =
 bin_SCRIPTS =

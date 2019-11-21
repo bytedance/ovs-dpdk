@@ -149,7 +149,6 @@ netdev_initialize(void)
         netdev_register_provider(&netdev_tap_class);
         netdev_vport_tunnel_register();
 
-        netdev_register_flow_api_provider(&netdev_offload_tc);
 #ifdef HAVE_AF_XDP
         netdev_register_provider(&netdev_afxdp_class);
 #endif
