@@ -2226,13 +2226,14 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
             offload->actions_len, &flow->mega_ufid, &info,
             NULL);
     ovs_mutex_unlock(&pmd->dp->port_mutex);
-    flow->actions_offloaded = info.actions_offloaded;
 
     if (ret) {
+        flow->actions_offloaded = false;
         return -1;
     }
-    dp_netdev_flow_ref(flow);
 
+    dp_netdev_flow_ref(flow);
+    flow->actions_offloaded = info.actions_offloaded;
     return 0;
 }
 
@@ -2261,10 +2262,6 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
             op = "add";
             ret = dp_netdev_flow_offload_put(offload);
             break;
-        case DP_NETDEV_FLOW_OFFLOAD_OP_MOD:
-            op = "modify";
-            ret = dp_netdev_flow_offload_put(offload);
-            break;
         case DP_NETDEV_FLOW_OFFLOAD_OP_DEL:
             op = "delete";
             ret = dp_netdev_flow_offload_del(offload);
@@ -2290,7 +2287,7 @@ queue_netdev_flow_del(struct dp_netdev_pmd_thread *pmd,
 
     if (ovsthread_once_start(&offload_thread_once)) {
         xpthread_cond_init(&dp_flow_offload.cond, NULL);
-        ovs_thread_create("dp_netdev_flow_offload",
+        ovs_thread_create("hw_offload",
                           dp_netdev_flow_offload_main, NULL);
         ovsthread_once_done(&offload_thread_once);
     }
@@ -2319,7 +2316,7 @@ queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
         ovsthread_once_done(&offload_thread_once);
     }
 
-    op = DP_NETDEV_FLOW_OFFLOAD_OP_MOD;
+    op = DP_NETDEV_FLOW_OFFLOAD_OP_ADD;
     offload = dp_netdev_alloc_flow_offload(pmd, flow, op);
     offload->match = *match;
     offload->actions = xmalloc(actions_len);

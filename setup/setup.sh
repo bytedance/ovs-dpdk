@@ -74,7 +74,7 @@ fi
 
 mode=`devlink dev eswitch show pci/$pci 2>/dev/null | awk '{print $3}'`
 
-if [[ $vfs -ne 16 ]]; then
+if [[ $vfs -ne $VF ]]; then
     echo 0 > /sys/class/net/${ETH}/device/sriov_numvfs
     echo $VF > /sys/class/net/${ETH}/device/sriov_numvfs
 fi
@@ -105,17 +105,16 @@ cpu=`echo $cpu`
 vfs=`cat /sys/class/net/${ETH}/device/sriov_numvfs`
 echo "if:$ETH pci:$pci vf_num:$vfs ip:$ip numa:$numa cpu:$cpu"
 
-echo "
-ovs-vsctl --no-wait set Open_vSwitch . \
-    other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
+launch_ovs="ovs-vsctl --no-wait set Open_vSwitch . \
+    other_config:dpdk-extra=\"-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu\" \
     other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
-    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem
-"
-ovs-vsctl --no-wait set Open_vSwitch . \
-    other_config:dpdk-extra="-w $pci,representor=[0-$(($vfs-1))] --legacy-mem -l $cpu" \
-    other_config:dpdk-hugepage-dir="/mnt/huge-1GB" \
-    other_config:dpdk-init=true other_config:hw-offload=false other_config:dpdk-socket-mem=$socket_mem \
+    other_config:dpdk-init=true other_config:dpdk-socket-mem=$socket_mem \
     other_config:hw-offload=true
+"
+
+echo -e $launch_ovs
+eval $launch_ovs
+#ovs-appctl -t ovsdb-server ovsdb-server/add-remote db:Open_vSwitch,Open_vSwitch,manager_options
 
 #allocate 4G for dpdk
 echo "init hugepages"
