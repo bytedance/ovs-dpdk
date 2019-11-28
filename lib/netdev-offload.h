@@ -63,15 +63,21 @@ struct netdev_flow_dump {
 /* Flow offloading. */
 struct offload_info {
     const struct dpif_class *dpif_class;
-    ovs_be16 tp_dst_port; /* Destination port for tunnel in SET action */
+
+    /* tunnel outter info */
+    ovs_be32 tun_dst;
+    struct eth_addr tun_dl_dst;
+    ovs_be16 tp_dst_port;
     uint8_t tunnel_csum_on; /* Tunnel header with checksum */
+    int vport_type;
 
     /*
      * The flow mark id assigened to the flow. If any pkts hit the flow,
      * it will be in the pkt meta data.
      */
     uint32_t flow_mark;
-    bool actions_offloaded; /* true if flow is fully actions_offloaded */
+    uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
+             need_decap:1; 
 };
 
 int netdev_flow_flush(struct netdev *);

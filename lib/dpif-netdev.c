@@ -80,6 +80,7 @@
 #include "unixctl.h"
 #include "util.h"
 #include "uuid.h"
+#include "netdev-vport-private.h"
 
 VLOG_DEFINE_THIS_MODULE(dpif_netdev);
 
@@ -395,20 +396,12 @@ enum rxq_cycles_counter_type {
     RXQ_N_CYCLES
 };
 
-enum {
-    DP_NETDEV_FLOW_OFFLOAD_OP_ADD,
-    DP_NETDEV_FLOW_OFFLOAD_OP_MOD,
-    DP_NETDEV_FLOW_OFFLOAD_OP_DEL,
-};
-
 struct dp_flow_offload_item {
-    struct dp_netdev_pmd_thread *pmd;
+    struct dp_netdev *dp;
     struct dp_netdev_flow *flow;
+    struct dp_netdev_actions *dp_act;
+    struct dp_netdev_actions *old_dp_act;
     int op;
-    struct match match;
-    struct nlattr *actions;
-    size_t actions_len;
-
     struct ovs_list node;
 };
 
@@ -472,6 +465,14 @@ struct dp_netdev_flow_stats {
     atomic_uint16_t tcp_flags;     /* Bitwise-OR of seen tcp_flags values. */
 };
 
+enum offload_status {
+    OFFLOAD_NONE,    /* not tried */
+    OFFLOAD_FAILED,  /* tried but failed, not need to try again */
+    OFFLOAD_MASK,    /* mask offloaded */
+    OFFLOAD_FULL,    /* full offloaded */ 
+    OFFLOAD_INGRESS, /* ingress offloaded */
+};
+
 /* A flow in 'dp_netdev_pmd_thread's 'flow_table'.
  *
  *
@@ -514,7 +515,6 @@ struct dp_netdev_flow {
     /* Hash table index by unmasked flow. */
     const struct cmap_node node; /* In owning dp_netdev_pmd_thread's */
                                  /* 'flow_table'. */
-    const struct cmap_node mark_node; /* In owning flow_mark's mark_to_flow */
     const ovs_u128 ufid;         /* Unique flow identifier. */
     const ovs_u128 mega_ufid;    /* Unique mega flow identifier. */
     const unsigned pmd_id;       /* The 'core_id' of pmd thread owning this */
@@ -527,7 +527,7 @@ struct dp_netdev_flow {
     struct ovs_refcount ref_cnt;
 
     bool dead;
-    bool actions_offloaded;      /* true if flow is fully offloaded */
+    enum offload_status status; /* offload status */
 
     /* Statistics. */
     struct dp_netdev_flow_stats stats;
@@ -550,6 +550,15 @@ static void dp_netdev_flow_unref(struct dp_netdev_flow *);
 static bool dp_netdev_flow_ref(struct dp_netdev_flow *);
 static int dpif_netdev_flow_from_nlattrs(const struct nlattr *, uint32_t,
                                          struct flow *, bool);
+static inline bool
+dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
+{
+    return flow->status == OFFLOAD_MASK || \
+                         flow->status == OFFLOAD_FULL;
+}
+
+static void
+dp_netdev_get_mega_ufid(const struct match *match, ovs_u128 *mega_ufid);
 
 /* A set of datapath actions within a "struct dp_netdev_flow".
  *
@@ -856,7 +865,7 @@ static void smc_clear_entry(struct smc_bucket *b, int idx);
 static void dp_netdev_request_reconfigure(struct dp_netdev *dp);
 static inline bool
 pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd);
-static void queue_netdev_flow_del(struct dp_netdev_pmd_thread *pmd,
+static void queue_netdev_flow_del(struct dp_netdev *dp,
                                   struct dp_netdev_flow *flow);
 
 static void
@@ -1960,11 +1969,39 @@ get_port_by_number(struct dp_netdev *dp,
     }
 }
 
+/* tnl pop ingress flow */
+struct ingress_flow {
+    struct dp_netdev_flow *flow;
+    struct netdev *ingress_netdev;
+    enum offload_status status;
+    struct hmap_node node;
+};
+
+/* tnl pop flow */
+struct tnl_pop_flow {
+    struct dp_netdev_flow *flow;
+    enum offload_status status;
+    struct hmap_node node;
+};
+
+static void ingress_flow_op_flush(struct ingress_flow *inflow, \
+                                  struct netdev_vport *vport);
+
 static void
 port_destroy(struct dp_netdev_port *port)
 {
     if (!port) {
         return;
+    }
+
+    if (netdev_is_flow_api_enabled()) {
+        if (netdev_vport_is_vport_class(netdev_get_class(port->netdev))){
+            struct netdev_vport *vport = netdev_vport_cast(port->netdev);
+            struct ingress_flow *inflow;
+            HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+                ingress_flow_op_flush(inflow, vport);
+            }
+        }
     }
 
     netdev_close(port->netdev);
@@ -2128,19 +2165,28 @@ dp_netdev_pmd_find_dpcls(struct dp_netdev_pmd_thread *pmd,
 }
 
 static struct dp_flow_offload_item *
-dp_netdev_alloc_flow_offload(struct dp_netdev_pmd_thread *pmd,
+dp_netdev_alloc_flow_offload(struct dp_netdev *dp,
                              struct dp_netdev_flow *flow,
+                             struct dp_netdev_actions *old_act,
                              int op)
 {
     struct dp_flow_offload_item *offload;
 
     offload = xzalloc(sizeof(*offload));
-    offload->pmd = pmd;
+    offload->dp = dp;
     offload->flow = flow;
     offload->op = op;
-
+    /* if get actions here, the actions might be 
+     * freed during the queueing.
+     */
+    offload->dp_act = NULL; 
+    if (old_act)
+        offload->old_dp_act = \
+                    dp_netdev_actions_create(\
+                            old_act->actions, \
+                                old_act->size);
     dp_netdev_flow_ref(flow);
-    dp_netdev_pmd_try_ref(pmd);
+    ovs_refcount_ref(&dp->ref_cnt);
 
     return offload;
 }
@@ -2148,10 +2194,10 @@ dp_netdev_alloc_flow_offload(struct dp_netdev_pmd_thread *pmd,
 static void
 dp_netdev_free_flow_offload(struct dp_flow_offload_item *offload)
 {
-    dp_netdev_pmd_unref(offload->pmd);
+    dp_netdev_unref(offload->dp);
     dp_netdev_flow_unref(offload->flow);
 
-    free(offload->actions);
+    dp_netdev_actions_free(offload->old_dp_act);
     free(offload);
 }
 
@@ -2164,28 +2210,579 @@ dp_netdev_append_flow_offload(struct dp_flow_offload_item *offload)
     ovs_mutex_unlock(&dp_flow_offload.mutex);
 }
 
+static void
+tnl_pop_flow_get_ufid(struct ingress_flow *inflow,\
+                      struct tnl_pop_flow *tnlflow, \
+                      ovs_u128 *ufid)
+{
+    ufid->u64.hi = inflow->flow->mega_ufid.u64.hi ^ tnlflow->flow->mega_ufid.u64.hi;
+    ufid->u64.lo = inflow->flow->mega_ufid.u64.lo ^ tnlflow->flow->mega_ufid.u64.lo;
+}
+
+static const struct nlattr *
+dp_netdev_action_get(const struct nlattr *actions,
+                     size_t act_len, enum ovs_action_attr type)
+{
+    const struct nlattr *a;
+    unsigned int left;
+
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, actions, act_len) {
+        int _type = nl_attr_type(a);
+        if ((enum ovs_action_attr)_type == type) {
+            return a;
+        }
+    }
+    return NULL;
+}
+
+static struct ingress_flow *
+ingress_flow_find(struct dp_netdev_flow *flow,\
+                  struct netdev_vport *vport, \
+                  bool *found)
+{
+    *found = false;
+
+    struct ingress_flow *inflow = NULL;
+
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH_WITH_HASH(inflow, node,
+            dp_netdev_flow_hash(&flow->mega_ufid), &vport->ingress_flows) {
+        if (ovs_u128_equals(inflow->flow->mega_ufid, flow->mega_ufid)) {
+            *found = true;
+            break;
+        }
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+    return inflow;
+}
+
+static void
+ingress_flow_free(struct ingress_flow *inflow)
+{
+    free(inflow);
+}
+
+static void
+ingress_flow_del(struct ingress_flow *inflow,\
+                 struct netdev_vport *vport)
+{
+    ovs_rwlock_wrlock(&vport->rwlock);
+    hmap_remove(&vport->ingress_flows, &inflow->node);
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    ingress_flow_free(inflow);
+}
+
+static struct ingress_flow *
+ingress_flow_new(struct dp_netdev_flow *flow, \
+                 struct netdev *inport)
+{
+    struct ingress_flow *inflow;
+
+    inflow = xzalloc(sizeof(struct ingress_flow));
+    inflow->ingress_netdev = inport;
+    inflow->flow = flow;
+    return inflow;
+}
+
+static void
+ingress_flow_insert(struct netdev_vport *vport,
+                    struct ingress_flow *inflow)
+{
+    ovs_rwlock_wrlock(&vport->rwlock);
+    hmap_insert(&vport->ingress_flows, &inflow->node, \
+                dp_netdev_flow_hash(&inflow->flow->mega_ufid)); 
+    ovs_rwlock_unlock(&vport->rwlock);
+}
+
+static int 
+tnl_pop_flow_op_put(struct ingress_flow *inflow,\
+                    struct tnl_pop_flow *tnlflow,\
+                    struct dp_netdev_actions *act, \
+                    struct offload_info *info)
+{
+    int ret;
+
+    /* set inner info */
+    struct match tnl_m; 
+    miniflow_expand(&tnlflow->flow->cr.flow.mf, &tnl_m.flow);
+    miniflow_expand(&tnlflow->flow->cr.mask->mf, &tnl_m.wc.masks);
+    memset(&tnl_m.tun_md, 0, sizeof tnl_m.tun_md);
+
+    /* set outter info */
+    struct flow in_flow;
+    miniflow_expand(&inflow->flow->cr.flow.mf, &in_flow);
+    info->tp_dst_port = in_flow.tp_dst; 
+    memcpy(&info->tun_dl_dst, &in_flow.dl_dst, sizeof(struct eth_addr));
+    info->tun_dst = in_flow.nw_dst;
+
+    /*FIXME: use tnlflow->in_port and netdev_get_type to set vport_type */
+    info->vport_type = VPORT_VXLAN;
+
+    ovs_u128 mega_ufid;
+    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
+    info->need_decap = 1;
+
+    ret = netdev_flow_put(inflow->ingress_netdev, &tnl_m,
+            act->actions, act->size, &mega_ufid, info,
+            NULL);
+    return ret;
+}
+
+static int
+tnl_pop_flow_op_del(struct ingress_flow *inflow, \
+                    struct tnl_pop_flow *tnlflow)
+{
+    int ret;
+    ovs_u128 mega_ufid;
+    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
+    ret = netdev_flow_del(inflow->ingress_netdev, \
+                            &mega_ufid, NULL);
+    return ret;
+}
+
+static int
+tnl_pop_flow_op_stat(struct ingress_flow *inflow, \
+                     struct tnl_pop_flow *tnlflow, \
+                     struct dpif_flow_stats *stats)
+{
+    int ret;
+    ovs_u128 mega_ufid;
+    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
+    ret = netdev_flow_stats_get(inflow->ingress_netdev, \
+                                &mega_ufid, stats);
+    return ret;
+}
+
+static void
+tnlflow_free(struct tnl_pop_flow *tnlflow)
+{
+    free(tnlflow);
+}
+
+static void
+tnlflow_del(struct tnl_pop_flow *tnlflow, \
+                 struct netdev_vport *vport)
+{
+    ovs_rwlock_wrlock(&vport->rwlock);
+    hmap_remove(&vport->tnl_pop_flows, &tnlflow->node);
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    tnlflow_free(tnlflow);
+}
+
+static void
+ingress_flow_op_flush(struct ingress_flow *inflow, \
+                      struct netdev_vport *vport)
+{
+    struct tnl_pop_flow *tnlflow;
+
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH(tnlflow, node, &vport->tnl_pop_flows) {
+        tnl_pop_flow_op_del(inflow, tnlflow);
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    ingress_flow_del(inflow, vport);
+}
+
+static void
+tnlflow_op_flush(struct tnl_pop_flow *tnlflow, \
+                 struct netdev_vport *vport)
+{
+    struct ingress_flow *inflow;
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+        tnl_pop_flow_op_del(inflow, tnlflow);
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    tnlflow_del(tnlflow, vport);
+}
+
+static enum offload_status
+try_offload_tnl_pop(struct ingress_flow *inflow,\
+                    struct netdev_vport *vport,\
+                    struct dp_netdev_actions *act, \
+                    struct offload_info *info)
+{
+    struct tnl_pop_flow *tnlflow;
+    int ret;
+    bool need_rollback = false;
+
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH(tnlflow, node, &vport->tnl_pop_flows) {
+        tnlflow->status = OFFLOAD_NONE;
+    }
+
+    HMAP_FOR_EACH(tnlflow, node, &vport->tnl_pop_flows) {
+        ret = tnl_pop_flow_op_put(inflow, tnlflow, act, info);
+        if (ret == -1) {
+            inflow->status = OFFLOAD_FAILED;
+            need_rollback = true;
+            break;
+        } else {
+            tnlflow->status = OFFLOAD_FULL;
+        }
+    }
+
+    if (need_rollback) {
+        HMAP_FOR_EACH(tnlflow, node, &vport->tnl_pop_flows) {
+            if (tnlflow->status == OFFLOAD_FULL) {
+                tnl_pop_flow_op_del(inflow, tnlflow);
+            }
+        }
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
+}
+
+static struct tnl_pop_flow*
+tnlflow_find(struct dp_netdev_flow *flow, \
+             struct netdev_vport *vport,\
+             bool *found)
+{
+    struct tnl_pop_flow *tnlflow;
+    *found = false;
+
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH_WITH_HASH(tnlflow, node, \
+                            dp_netdev_flow_hash(&flow->mega_ufid), \
+                            &vport->tnl_pop_flows) {
+        if (ovs_u128_equals(tnlflow->flow->mega_ufid, flow->mega_ufid)) {
+            *found = true;
+            break;
+        }
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+    return tnlflow;
+}
+
+static struct tnl_pop_flow*
+tnlflow_new(struct dp_netdev_flow *flow)
+{
+    struct tnl_pop_flow *tnlflow;
+    tnlflow = xzalloc(sizeof(struct tnl_pop_flow));
+    tnlflow->flow = flow;
+    return tnlflow;
+}
+
+static void
+tnlflow_insert(struct netdev_vport *vport, \
+               struct tnl_pop_flow *tnlflow)
+{
+    ovs_rwlock_wrlock(&vport->rwlock);
+    hmap_insert(&vport->tnl_pop_flows, \
+            &tnlflow->node, \
+            dp_netdev_flow_hash(&tnlflow->flow->mega_ufid));
+    ovs_rwlock_unlock(&vport->rwlock);
+}
+
+static struct netdev_vport *
+try_ingress(struct dp_netdev_actions *act, \
+            struct dp_netdev *dp)
+{
+    const struct nlattr *tnl_pop = dp_netdev_action_get(act->actions,\
+            act->size, OVS_ACTION_ATTR_TUNNEL_POP);
+
+    if (!tnl_pop) {
+        return NULL;
+    }
+
+    odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
+    struct dp_netdev_port *tnl_port = dp_netdev_lookup_port(dp, portno);
+    if (!tnl_port) {
+        return NULL;
+    }
+
+    struct netdev_vport *vport = netdev_vport_cast(tnl_port->netdev);
+    return vport;
+}
+
+static int 
+try_del_ingress(struct dp_netdev_flow *flow,\
+                struct dp_netdev_actions *act, \
+                struct dp_netdev *dp)
+{
+    struct netdev_vport *vport = try_ingress(act, dp);
+    if (!vport) {
+        return -1;
+    }
+    // get old act and get vport 
+    bool found;
+    struct ingress_flow *inflow = ingress_flow_find(flow, vport, &found);
+    /* del all tnl_pop flows */
+    if (found) {
+        ingress_flow_op_flush(inflow, vport);
+        return 0;
+    }
+    return -1;
+}
+
+static bool
+try_tnlflow(struct dp_netdev_flow *flow, \
+            struct netdev *inport)
+{
+    if(!flow_tnl_dst_is_set(&flow->flow.tunnel)) {
+        return false;
+    }
+
+    if (!netdev_get_tunnel_config(inport)) {
+        return false;
+    }
+    return true;
+}
+
+static int 
+try_del_tnlflow(struct dp_netdev_flow *flow, \
+                struct netdev *inport)
+{
+    bool is_tnlflow = try_tnlflow(flow, inport);
+    if (!is_tnlflow) {
+        return -1;
+    }
+
+    struct tnl_pop_flow *tnlflow;
+    bool found;
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+    tnlflow = tnlflow_find(flow, vport, &found);
+    if (found) {
+       tnlflow_op_flush(tnlflow, vport); 
+       return 0;
+    }
+    return -1;
+}
+
 static int
 dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 {
     struct dp_netdev_port *port;
     struct dp_netdev_flow *flow = offload->flow;
     odp_port_t in_port = flow->flow.in_port.odp_port;
-    struct dp_netdev_pmd_thread *pmd = offload->pmd;
+    struct dp_netdev *dp = offload->dp;
     int ret = -1;
 
-    ovs_mutex_lock(&pmd->dp->port_mutex);
-    port = dp_netdev_lookup_port(pmd->dp, in_port);
+    ovs_mutex_lock(&dp->port_mutex);
+    port = dp_netdev_lookup_port(dp, in_port);
     if (port) {
+        ret = try_del_ingress(flow, offload->dp_act, dp); 
+        if (!ret) {
+            goto exit;
+        }
+        ret = try_del_tnlflow(flow, port->netdev);
+        if (!ret) {
+            goto exit;
+        }
         ret = netdev_flow_del(port->netdev, &flow->mega_ufid, NULL);
     }
-    ovs_mutex_unlock(&pmd->dp->port_mutex);
+exit:
+    ovs_mutex_unlock(&dp->port_mutex);
     if (ret) {
         return -1;
     }
-    dp_netdev_flow_unref(flow);
     return 0;
 }
 
+static enum offload_status
+dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
+                              struct netdev *inport,\
+                              struct dp_flow_offload_item *offload, \
+                              struct offload_info *info)
+{
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+    struct ingress_flow *inflow;
+    struct tnl_pop_flow *tnlflow;
+
+    bool is_tnlflow = try_tnlflow(flow, inport);
+    if (!is_tnlflow) {
+        return OFFLOAD_NONE;
+    }
+
+    int ret = 0;
+    bool need_rollback = false;
+
+    struct dp_netdev_actions *act = offload->dp_act;
+
+    bool found;
+    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD) {
+        tnlflow = tnlflow_find(flow, vport, &found);
+        if (found)
+            return tnlflow->flow->status;
+        tnlflow = tnlflow_new(flow);
+    } else {
+        /* modify */
+        tnlflow = tnlflow_find(flow, vport, &found);
+        if (!found)
+            return OFFLOAD_NONE;
+    }
+
+    ovs_rwlock_rdlock(&vport->rwlock);
+    HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+        inflow->status = OFFLOAD_NONE;
+    }
+
+    HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+        ret = tnl_pop_flow_op_put(inflow, tnlflow, act, info);
+        if (ret == -1) {
+            inflow->status = OFFLOAD_FAILED;
+            need_rollback = true;
+            break;
+        } else {
+            inflow->status = OFFLOAD_FULL;
+        }
+    }
+
+    if (need_rollback) {
+        HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+            if (inflow->status == OFFLOAD_FULL) {
+                tnl_pop_flow_op_del(inflow, tnlflow);
+            }
+        }
+    }
+    ovs_rwlock_unlock(&vport->rwlock);
+
+    if (!need_rollback) {
+        tnlflow_insert(vport, tnlflow);
+    } else {
+        tnlflow_free(tnlflow);
+    }
+
+    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
+}
+
+static enum offload_status
+dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
+                                  struct dp_netdev *dp, \
+                                  struct netdev *inport,\
+                                  struct dp_flow_offload_item *offload, \
+                                  struct offload_info *info)
+{
+    struct dp_netdev_actions *act = offload->dp_act;
+    const struct nlattr *tnl_pop = dp_netdev_action_get(act->actions,\
+                                    act->size, OVS_ACTION_ATTR_TUNNEL_POP);
+    if (!tnl_pop) {
+        return OFFLOAD_NONE;
+    }
+
+    odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
+    struct dp_netdev_port *tnl_port = dp_netdev_lookup_port(dp, portno);
+    if (!tnl_port) {
+        return OFFLOAD_FAILED;
+    }
+
+    struct netdev_vport *vport = netdev_vport_cast(tnl_port->netdev);
+
+    struct ingress_flow *inflow;
+    bool found;
+    inflow = ingress_flow_find(flow, vport, &found);
+    /* multiple pmd thread has the same flow in
+     * pmd thread flow table
+     */
+    if (found) {
+        return inflow->flow->status;
+    }
+
+    inflow = ingress_flow_new(flow, inport);
+
+    enum offload_status status;
+    status = try_offload_tnl_pop(inflow, vport, act, info);
+    if (status == OFFLOAD_FULL) {
+        ingress_flow_insert(vport, inflow);
+    } else {
+        ingress_flow_free(inflow);
+    }
+
+    return status;
+}
+
+static enum offload_status
+dp_netdev_try_offload_ingress(struct dp_netdev_flow *flow,\
+                              struct dp_netdev *dp, \
+                              struct netdev *inport,\
+                              struct dp_flow_offload_item *offload, \
+                              struct offload_info *info)
+{
+    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD)
+        return dp_netdev_try_offload_ingress_add(flow, dp, inport, offload, info);
+
+    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD) {
+        struct dp_netdev_actions *act = offload->old_dp_act;
+        try_del_ingress(flow, act, dp);
+        return OFFLOAD_NONE;
+    }
+    return OFFLOAD_NONE;
+}
+
+static int
+dp_netdev_normal_offload(struct dp_netdev_flow *flow, \
+                         struct netdev *netdev, \
+                         struct dp_flow_offload_item *offload, \
+                         struct offload_info *info)
+{
+    struct match m; 
+    miniflow_expand(&flow->cr.mask->mf, &m.flow);
+    miniflow_expand(&flow->cr.flow.mf, &m.wc.masks);
+    memset(&m.tun_md, 0, sizeof m.tun_md);
+    int ret;
+    struct dp_netdev_actions *act = offload->dp_act;
+
+    ret = netdev_flow_put(netdev, &m, act->actions, \
+            act->size, &flow->mega_ufid, info, NULL);
+    return ret;
+}
+
+static int
+dp_netdev_try_offload(struct dp_flow_offload_item *offload)
+{
+    struct dp_netdev *dp = offload->dp;
+    struct dp_netdev_flow *flow = offload->flow;
+    odp_port_t in_port = flow->flow.in_port.odp_port;
+    struct dp_netdev_port *port;
+    struct offload_info info;
+
+    const struct dpif_class *dpif_class = dp->class;
+    info.dpif_class = dpif_class;
+
+    if (flow->dead || flow->status == OFFLOAD_FAILED) {
+        return -1;
+    }
+
+    ovs_mutex_lock(&dp->port_mutex);
+    port = dp_netdev_lookup_port(dp, in_port);
+    if (!port) {
+        ovs_mutex_unlock(&dp->port_mutex);
+        return -1;
+    }
+    
+    struct netdev *netdev = port->netdev;
+    if (!strcmp(netdev_get_type(netdev), "internal")) {
+        ovs_mutex_unlock(&dp->port_mutex);
+        return -1;
+    }
+
+    enum offload_status status;
+    status = dp_netdev_try_offload_ingress(flow, dp, netdev, offload, &info);
+    int ret = 0;
+    if (status != OFFLOAD_NONE) {
+        flow->status = status;
+        goto exit;
+    }
+    
+    status = dp_netdev_try_offload_tnl_pop(flow, netdev, offload, &info);
+    if (status != OFFLOAD_NONE) {
+        flow->status = status;
+        goto exit;
+    }
+
+    ret = dp_netdev_normal_offload(flow, netdev, offload, &info); 
+    flow->status = info.actions_offloaded ? OFFLOAD_FULL : OFFLOAD_FAILED;
+
+exit:
+    ovs_mutex_unlock(&dp->port_mutex);
+    return ret;
+}
+ 
 /*
  * There are two flow offload operations here: addition and modification.
  *
@@ -2200,41 +2797,7 @@ dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 static int
 dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
 {
-    struct dp_netdev_port *port;
-    struct dp_netdev_pmd_thread *pmd = offload->pmd;
-    const struct dpif_class *dpif_class = pmd->dp->class;
-    struct dp_netdev_flow *flow = offload->flow;
-    odp_port_t in_port = flow->flow.in_port.odp_port;
-    struct offload_info info;
-    int ret = 0;
-
-    if (flow->dead) {
-        return -1;
-    }
-
-    info.dpif_class = dpif_class;
-
-    ovs_mutex_lock(&pmd->dp->port_mutex);
-    port = dp_netdev_lookup_port(pmd->dp, in_port);
-    if (!port) {
-        ovs_mutex_unlock(&pmd->dp->port_mutex);
-        return -1;
-    }
-
-    ret = netdev_flow_put(port->netdev, &offload->match,
-            CONST_CAST(struct nlattr *, offload->actions),
-            offload->actions_len, &flow->mega_ufid, &info,
-            NULL);
-    ovs_mutex_unlock(&pmd->dp->port_mutex);
-
-    if (ret) {
-        flow->actions_offloaded = false;
-        return -1;
-    }
-
-    dp_netdev_flow_ref(flow);
-    flow->actions_offloaded = info.actions_offloaded;
-    return 0;
+    return dp_netdev_try_offload(offload);
 }
 
 static void *
@@ -2257,9 +2820,17 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
         offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
         ovs_mutex_unlock(&dp_flow_offload.mutex);
 
+        /*  get actions here, act will not be freed as 
+         *  this is not in a grace period.
+         */
+        offload->dp_act = dp_netdev_flow_get_actions(offload->flow);
         switch (offload->op) {
         case DP_NETDEV_FLOW_OFFLOAD_OP_ADD:
             op = "add";
+            ret = dp_netdev_flow_offload_put(offload);
+            break;
+        case DP_NETDEV_FLOW_OFFLOAD_OP_MOD:
+            op = "mod";
             ret = dp_netdev_flow_offload_put(offload);
             break;
         case DP_NETDEV_FLOW_OFFLOAD_OP_DEL:
@@ -2280,7 +2851,7 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
 }
 
 static void
-queue_netdev_flow_del(struct dp_netdev_pmd_thread *pmd,
+queue_netdev_flow_del(struct dp_netdev *dp,
                       struct dp_netdev_flow *flow)
 {
     struct dp_flow_offload_item *offload;
@@ -2292,18 +2863,18 @@ queue_netdev_flow_del(struct dp_netdev_pmd_thread *pmd,
         ovsthread_once_done(&offload_thread_once);
     }
 
-    offload = dp_netdev_alloc_flow_offload(pmd, flow,
+    offload = dp_netdev_alloc_flow_offload(dp, flow, NULL, 
                                            DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
     dp_netdev_append_flow_offload(offload);
 }
 
 static void
-queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
-                      struct dp_netdev_flow *flow, struct match *match,
-                      const struct nlattr *actions, size_t actions_len)
+queue_netdev_flow_put(struct dp_netdev *dp,\
+                      struct dp_netdev_flow *flow, \
+                      struct dp_netdev_actions *old_act, \
+                      int op)
 {
     struct dp_flow_offload_item *offload;
-    int op;
 
     if (!netdev_is_flow_api_enabled()) {
         return;
@@ -2316,13 +2887,7 @@ queue_netdev_flow_put(struct dp_netdev_pmd_thread *pmd,
         ovsthread_once_done(&offload_thread_once);
     }
 
-    op = DP_NETDEV_FLOW_OFFLOAD_OP_ADD;
-    offload = dp_netdev_alloc_flow_offload(pmd, flow, op);
-    offload->match = *match;
-    offload->actions = xmalloc(actions_len);
-    memcpy(offload->actions, actions, actions_len);
-    offload->actions_len = actions_len;
-
+    offload = dp_netdev_alloc_flow_offload(dp, flow, old_act, op);
     dp_netdev_append_flow_offload(offload);
 }
 
@@ -2339,8 +2904,8 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     ovs_assert(cls != NULL);
     dpcls_remove(cls, &flow->cr);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
-    if (flow->actions_offloaded) {
-        queue_netdev_flow_del(pmd, flow);
+    if (dp_netdev_flow_offload(flow)) {
+        queue_netdev_flow_del(pmd->dp, flow);
     }
     flow->dead = true;
 
@@ -2861,7 +3426,7 @@ dp_netdev_flow_to_dpif_flow(const struct dp_netdev_flow *netdev_flow,
     flow->pmd_id = netdev_flow->pmd_id;
     get_dpif_flow_stats(netdev_flow, &flow->stats);
 
-    flow->attrs.offloaded = netdev_flow->actions_offloaded;
+    flow->attrs.offloaded = dp_netdev_flow_offload(netdev_flow);
     flow->attrs.dp_layer = "ovs";
 }
 
@@ -3032,7 +3597,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     flow->dead = false;
     flow->batch = NULL;
 
-    flow->actions_offloaded = false;
+    flow->status = OFFLOAD_NONE;
 
     *CONST_CAST(unsigned *, &flow->pmd_id) = pmd->core_id;
     *CONST_CAST(struct flow *, &flow->flow) = match->flow;
@@ -3050,7 +3615,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     cmap_insert(&pmd->flow_table, CONST_CAST(struct cmap_node *, &flow->node),
                 dp_netdev_flow_hash(&flow->ufid));
 
-    queue_netdev_flow_put(pmd, flow, match, actions, actions_len);
+    queue_netdev_flow_put(pmd->dp, flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
 
     if (OVS_UNLIKELY(!VLOG_DROP_DBG((&upcall_rl)))) {
         struct ds ds = DS_EMPTY_INITIALIZER;
@@ -3139,8 +3704,9 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
-            queue_netdev_flow_put(pmd, netdev_flow, match,
-                                  put->actions, put->actions_len);
+            if (dp_netdev_flow_offload(netdev_flow))
+                queue_netdev_flow_put(pmd->dp, netdev_flow, old_actions, \
+                                        DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
 
             if (stats) {
                 get_dpif_flow_stats(netdev_flow, stats);
@@ -3389,6 +3955,75 @@ dpif_netdev_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread_)
 }
 
 static int
+try_ingress_stats(struct dp_netdev_flow *flow, \
+                  struct dp_netdev_actions *act, \
+                  struct dp_netdev *dp, \
+                  struct dpif_flow_stats *stats)
+{
+    struct netdev_vport *vport = \
+                        try_ingress(act, dp);
+    if (!vport) {
+        return -1;
+    }
+
+    bool found;
+    struct ingress_flow *inflow = \
+                        ingress_flow_find(flow, vport, &found);
+    if (found) {
+        struct dpif_flow_stats _stats;
+        struct tnl_pop_flow *tnlflow;
+        int ret;
+
+        memset(stats, 0, sizeof(*stats));
+
+        ovs_rwlock_rdlock(&vport->rwlock);
+        HMAP_FOR_EACH(tnlflow, node, &vport->tnl_pop_flows) {
+            ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
+            if (!ret) {
+                stats->n_packets += _stats.n_packets;
+                stats->n_bytes += _stats.n_bytes;
+            }
+        }
+        ovs_rwlock_unlock(&vport->rwlock);
+        return 0;
+    }
+    return -1;
+}
+
+static int
+try_tnlflow_stats(struct dp_netdev_flow *flow, \
+                  struct netdev *inport, \
+                  struct dpif_flow_stats *stats)
+{
+    bool is_tnlflow = try_tnlflow(flow, inport);
+    if (!is_tnlflow)
+        return -1;
+
+    bool found;
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+    struct tnl_pop_flow *tnlflow = \
+                        tnlflow_find(flow, vport, &found);
+    if (found) {
+        struct dpif_flow_stats _stats;
+        int ret;
+        struct ingress_flow *inflow;
+        memset(stats, 0, sizeof(*stats));
+
+        ovs_rwlock_rdlock(&vport->rwlock);
+        HMAP_FOR_EACH(inflow, node, &vport->ingress_flows) {
+            ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
+            if (!ret) {
+                stats->n_packets += _stats.n_packets;
+                stats->n_bytes += _stats.n_packets;
+            }
+        }
+        ovs_rwlock_unlock(&vport->rwlock);
+        return 0;
+    }
+    return -1;
+}
+
+static int
 dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
                          struct dp_netdev_pmd_thread *pmd)
 {
@@ -3405,11 +4040,28 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
         return -1;
     }
     /* get offloaded stats */
+    ret = try_ingress_stats(netdev_flow, \
+                        dp_netdev_flow_get_actions(netdev_flow),\
+                        pmd->dp, \
+                        &stats);
+    if (!ret) {
+        goto exit;
+    }
+
+    ret = try_tnlflow_stats(netdev_flow, \
+                            port->netdev, \
+                            &stats);
+    if (!ret) {
+        goto exit;
+    }
+
     ret = netdev_flow_stats_get(port->netdev, &netdev_flow->mega_ufid, &stats);
     ovs_mutex_unlock(&pmd->dp->port_mutex);
     if (ret) {
         return -1;
     }
+
+exit:
     if (stats.n_packets) {
         atomic_store_relaxed(&netdev_flow->stats.used, pmd->ctx.now / 1000);
         non_atomic_ullong_add(&netdev_flow->stats.packet_count, stats.n_packets);
@@ -3460,7 +4112,7 @@ dpif_netdev_flow_dump_next(struct dpif_flow_dump_thread *thread_,
                                                      struct dp_netdev_flow,
                                                      node);
                 /* Read hardware stats in case of hardware offload */
-                if (netdev_flows[n_flows]->actions_offloaded) {
+                if (dp_netdev_flow_offload(netdev_flows[n_flows])) {
                     dpif_netdev_offload_used(netdev_flows[n_flows], pmd);
                 }
             }
@@ -4477,6 +5129,20 @@ rxq_scheduling(struct dp_netdev *dp, bool pinned) OVS_REQUIRES(dp->port_mutex)
     rr_numa_list_destroy(&rr);
     free(rxqs);
 }
+
+#if 0
+static void
+flush_offload_flows(struct dp_netdev_pmd_thread *pmd)
+{
+    struct dp_netdev *dp = pmd->dp;
+    struct dp_netdev_flow *flow;
+
+    CMAP_FOR_EACH(flow, node, pmd->flow_table) {
+
+    }
+
+}
+#endif
 
 static void
 reload_affected_pmds(struct dp_netdev *dp)
@@ -7839,3 +8505,6 @@ dpcls_lookup(struct dpcls *cls, const struct netdev_flow_key *keys[],
     }
     return false;
 }
+
+
+

@@ -20,6 +20,8 @@
 #include "dpif-netdev.h"
 #include "netdev-offload-provider.h"
 #include "netdev-offload-dpdk-private.h"
+#include <net/if.h>
+#include "netdev-vport-private.h"
 #include "openvswitch/match.h"
 #include "openvswitch/vlog.h"
 #include "packets.h"
@@ -27,25 +29,6 @@
 VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk_flow);
 
 static struct vlog_rate_limit error_rl = VLOG_RATE_LIMIT_INIT(100, 5);
-
-void
-netdev_dpdk_flow_patterns_free(struct flow_patterns *patterns)
-{
-    /* When calling this function 'patterns' must be valid */
-    int i;
-
-    for (i = 0; i < patterns->cnt; i++) {
-        if (patterns->items[i].spec) {
-            free((void *)patterns->items[i].spec);
-        }
-        if (patterns->items[i].mask) {
-            free((void *)patterns->items[i].mask);
-        }
-    }
-    free(patterns->items);
-    patterns->items = NULL;
-    patterns->cnt = 0;
-}
 
 void
 netdev_dpdk_flow_actions_free(struct flow_actions *actions)
@@ -390,29 +373,6 @@ netdev_dpdk_flow_ds_put_flow(struct ds *s,
 }
 
 static void
-add_flow_pattern(struct flow_patterns *patterns, enum rte_flow_item_type type,
-                 const void *spec, const void *mask)
-{
-    int cnt = patterns->cnt;
-
-    if (cnt == 0) {
-        patterns->current_max = 8;
-        patterns->items = xcalloc(patterns->current_max,
-                                  sizeof *patterns->items);
-    } else if (cnt == patterns->current_max) {
-        patterns->current_max *= 2;
-        patterns->items = xrealloc(patterns->items, patterns->current_max *
-                                   sizeof *patterns->items);
-    }
-
-    patterns->items[cnt].type = type;
-    patterns->items[cnt].spec = spec;
-    patterns->items[cnt].mask = mask;
-    patterns->items[cnt].last = NULL;
-    patterns->cnt++;
-}
-
-static void
 add_flow_action(struct flow_actions *actions, enum rte_flow_action_type type,
                 const void *conf)
 {
@@ -471,19 +431,240 @@ netdev_dpdk_flow_actions_add_mark_rss(struct flow_actions *actions,
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
 }
 
-int
-netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
-                              const struct match *match)
-{
-    uint8_t proto = 0;
+#define VXLAN_DST_PORT 4789
 
+static int
+netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
+                                const struct match *match,
+                                const struct offload_info *info)
+                                
+{
+    static struct rte_flow_item_eth eth_spec;
+    static struct rte_flow_item_eth eth_mask = {
+        .dst = {
+            .addr_bytes = "\xff\xff\xff\xff\xff\xff", 
+        },
+        .type = 0xffff,
+    };
+
+    static struct rte_flow_item_ipv4 ipv4_spec;
+    static struct rte_flow_item_ipv4 ipv4_mask = {
+        .hdr = {
+            .dst_addr = 0xFFFFFFFF,
+            .next_proto_id = 0xFF,
+        },
+
+    };
+
+    static struct rte_flow_item_udp udp_spec = {
+        .hdr = {
+            .dst_port = RTE_BE16(VXLAN_DST_PORT),
+        },
+    };
+    static struct rte_flow_item_udp udp_mask = {
+        .hdr = {
+            .dst_port = (uint16_t)-1,
+        },
+    };
+
+    static struct rte_flow_item_vxlan vxlan_spec;
+    static struct rte_flow_item_vxlan vxlan_mask = {
+        .vni = "\xff\xff\xff",
+    };
+
+    static struct rte_flow_item_eth ieth_spec;
+    static struct rte_flow_item_eth ieth_mask = {
+        .dst = {
+            .addr_bytes = "\xff\xff\xff\xff\xff\xff",
+        },
+    };
+
+    enum {ETH, IPV4, UDP, VXLAN, IETH, IEND};
+    static struct rte_flow_item pattern[] = {
+        [ETH] = {
+            .type = RTE_FLOW_ITEM_TYPE_ETH,
+            .spec = &eth_spec,
+            .mask = &eth_mask,
+            .last = NULL,
+        },
+        [IPV4] = {
+            .type = RTE_FLOW_ITEM_TYPE_IPV4,
+            .spec = &ipv4_spec,
+            .mask = &ipv4_mask,
+            .last = NULL,
+        },
+        [UDP] = {
+            .type = RTE_FLOW_ITEM_TYPE_UDP,
+            .spec = &udp_spec,
+            .mask = &udp_mask,
+            .last = NULL,
+        },
+        [VXLAN] = {
+            .type = RTE_FLOW_ITEM_TYPE_VXLAN,
+            .spec = &vxlan_spec,
+            .mask = &vxlan_mask,
+            .last = NULL,
+        },
+        [IETH] = {
+            .type = RTE_FLOW_ITEM_TYPE_ETH,
+            .spec = &ieth_spec,
+            .mask = &ieth_mask,
+            .last = NULL,
+        },
+        [IEND] = {
+            .type = RTE_FLOW_ITEM_TYPE_END,
+            .spec = NULL,
+            .mask = NULL,
+            .last = NULL,
+        },
+    };
+
+    /* Eth */
+    {
+        struct rte_flow_item_eth *spec;
+        spec = CONST_CAST(typeof(spec), pattern[ETH].spec);
+
+        memcpy(&spec->dst, \
+                &info->tun_dl_dst, sizeof(spec->dst));
+        spec->type = RTE_BE16(0x0800);
+    }
+
+    /* IP v4 */
+    {
+        struct rte_flow_item_ipv4 *spec;
+
+        spec = CONST_CAST(typeof(spec), pattern[IPV4].spec);
+
+        spec->hdr.dst_addr        = info->tun_dst;
+        spec->hdr.next_proto_id   = IPPROTO_UDP;
+    }
+
+    /* UDP */
+    {
+        /* do nothing */
+        /* set 4789 */
+    }
+
+    /* vxlan */
+    {
+        struct rte_flow_item_vxlan *spec;
+        spec = CONST_CAST(typeof(spec), pattern[VXLAN].spec);
+        ovs_be64 tun_id = match->flow.tunnel.tun_id;
+
+        spec->vni[0] = tun_id & 0xff;
+        spec->vni[1] = (tun_id >> 8) & 0xff;
+        spec->vni[2] = (tun_id >> 16) & 0xff;
+    }
+
+    /* inner eth */
+    {
+        struct rte_flow_item_eth *spec;
+        spec = CONST_CAST(typeof(spec), pattern[IETH].spec);
+
+        memcpy(&spec->dst, &match->flow.dl_dst, sizeof(spec->dst));
+    }
+
+    *patterns = pattern;
+    return 0;
+}
+
+static bool
+is_vxlan_flow(const struct match *match,
+                struct offload_info *info)
+{
+    bool is_tnl = flow_tnl_dst_is_set(&match->flow.tunnel);
+    bool is_vxlan = info->vport_type == VPORT_VXLAN;
+    return is_tnl && is_vxlan;
+}
+
+static int
+netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
+                                const struct match *match)
+{
+    static struct rte_flow_item_eth eth_spec;
+    static struct rte_flow_item_eth eth_mask;
+
+    static struct rte_flow_item_vlan vlan_spec;
+    static struct rte_flow_item_vlan vlan_mask;
+
+    static struct rte_flow_item_ipv4 ipv4_spec;
+    static struct rte_flow_item_ipv4 ipv4_mask;
+
+    static struct rte_flow_item_udp udp_spec;
+    static struct rte_flow_item_udp udp_mask;
+
+    static struct rte_flow_item_tcp tcp_spec;
+    static struct rte_flow_item_tcp tcp_mask;
+
+    static struct rte_flow_item_icmp icmp_spec;
+    static struct rte_flow_item_icmp icmp_mask;
+
+    static struct rte_flow_item_sctp sctp_spec;
+    static struct rte_flow_item_sctp sctp_mask;
+
+    enum {ETH, VLAN, IPV4, TCP, UDP, ICMP, SCTP, IEND};
+    static struct rte_flow_item pattern[] = {
+        [ETH] = {
+            .type = RTE_FLOW_ITEM_TYPE_ETH,
+            .spec = &eth_spec,
+            .mask = &eth_mask,
+            .last = NULL,
+        },
+        [VLAN] = {
+            .type = RTE_FLOW_ITEM_TYPE_VLAN,
+            .spec = &vlan_spec,
+            .mask = &vlan_mask,
+            .last = NULL,
+        },
+        [IPV4] = {
+            .type = RTE_FLOW_ITEM_TYPE_IPV4,
+            .spec = &ipv4_spec,
+            .mask = &ipv4_mask,
+            .last = NULL,
+        },
+        [UDP] = {
+            .type = RTE_FLOW_ITEM_TYPE_UDP,
+            .spec = &udp_spec,
+            .mask = &udp_mask,
+            .last = NULL,
+        },
+        [TCP] = {
+            .type = RTE_FLOW_ITEM_TYPE_TCP,
+            .spec = &tcp_spec,
+            .mask = &tcp_mask,
+            .last = NULL,
+        },
+        [ICMP] = {
+            .type = RTE_FLOW_ITEM_TYPE_ICMP,
+            .spec = &icmp_spec,
+            .mask = &icmp_mask,
+            .last = NULL,
+        },
+        [SCTP] = {
+            .type = RTE_FLOW_ITEM_TYPE_SCTP,
+            .spec = &sctp_spec,
+            .mask = &sctp_mask,
+            .last = NULL,
+        },
+        [IEND] = {
+            .type = RTE_FLOW_ITEM_TYPE_END,
+            .spec = NULL,
+            .mask = NULL,
+            .last = NULL,
+        },
+    };
+
+    uint8_t proto = 0;
     /* Eth */
     if (!eth_addr_is_zero(match->wc.masks.dl_src) ||
         !eth_addr_is_zero(match->wc.masks.dl_dst)) {
         struct rte_flow_item_eth *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        pattern[ETH].spec = &eth_spec; 
+        pattern[ETH].mask = &eth_mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[ETH].spec);
+        mask = CONST_CAST(typeof(mask), pattern[ETH].mask);
 
         memcpy(&spec->dst, &match->flow.dl_dst, sizeof spec->dst);
         memcpy(&spec->src, &match->flow.dl_src, sizeof spec->src);
@@ -492,8 +673,6 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         memcpy(&mask->dst, &match->wc.masks.dl_dst, sizeof mask->dst);
         memcpy(&mask->src, &match->wc.masks.dl_src, sizeof mask->src);
         mask->type = match->wc.masks.dl_type;
-
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_ETH, spec, mask);
     } else {
         /*
          * If user specifies a flow (like UDP flow) without L2 patterns,
@@ -502,31 +681,33 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
          * NIC (such as XL710) doesn't support that. Below is a workaround,
          * which simply matches any L2 pkts.
          */
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_ETH, NULL, NULL);
+        pattern[ETH].spec = NULL;
+        pattern[ETH].mask = NULL;
     }
 
     /* VLAN */
     if (match->wc.masks.vlans[0].tci && match->flow.vlans[0].tci) {
         struct rte_flow_item_vlan *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[VLAN].spec);
+        mask = CONST_CAST(typeof(mask), pattern[VLAN].mask);
 
         spec->tci = match->flow.vlans[0].tci & ~htons(VLAN_CFI);
         mask->tci = match->wc.masks.vlans[0].tci & ~htons(VLAN_CFI);
 
         /* Match any protocols. */
         mask->inner_type = 0;
-
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_VLAN, spec, mask);
+        pattern[VLAN].type = RTE_FLOW_ITEM_TYPE_VLAN;
+    } else {
+        pattern[VLAN].type = RTE_FLOW_ITEM_TYPE_VOID;
     }
 
     /* IP v4 */
     if (match->flow.dl_type == htons(ETH_TYPE_IP)) {
         struct rte_flow_item_ipv4 *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[IPV4].spec);
+        mask = CONST_CAST(typeof(mask), pattern[IPV4].mask);
 
         spec->hdr.type_of_service = match->flow.nw_tos;
         spec->hdr.time_to_live    = match->flow.nw_ttl;
@@ -540,10 +721,15 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         mask->hdr.src_addr        = match->wc.masks.nw_src;
         mask->hdr.dst_addr        = match->wc.masks.nw_dst;
 
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_IPV4, spec, mask);
-
         /* Save proto for L4 protocol setup. */
         proto = spec->hdr.next_proto_id & mask->hdr.next_proto_id;
+        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_IPV4;
+    } else {
+        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
     }
 
     if (proto != IPPROTO_ICMP && proto != IPPROTO_UDP  &&
@@ -563,8 +749,8 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
     if (proto == IPPROTO_TCP) {
         struct rte_flow_item_tcp *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[TCP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[TCP].mask);
 
         spec->hdr.src_port  = match->flow.tp_src;
         spec->hdr.dst_port  = match->flow.tp_dst;
@@ -576,12 +762,16 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         mask->hdr.data_off  = ntohs(match->wc.masks.tcp_flags) >> 8;
         mask->hdr.tcp_flags = ntohs(match->wc.masks.tcp_flags) & 0xff;
 
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_TCP, spec, mask);
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_TCP;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+
     } else if (proto == IPPROTO_UDP) {
         struct rte_flow_item_udp *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[UDP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[UDP].mask);
 
         spec->hdr.src_port = match->flow.tp_src;
         spec->hdr.dst_port = match->flow.tp_dst;
@@ -589,12 +779,16 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         mask->hdr.src_port = match->wc.masks.tp_src;
         mask->hdr.dst_port = match->wc.masks.tp_dst;
 
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_UDP, spec, mask);
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_UDP;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+
     } else if (proto == IPPROTO_SCTP) {
         struct rte_flow_item_sctp *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[SCTP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[SCTP].mask);
 
         spec->hdr.src_port = match->flow.tp_src;
         spec->hdr.dst_port = match->flow.tp_dst;
@@ -602,12 +796,15 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         mask->hdr.src_port = match->wc.masks.tp_src;
         mask->hdr.dst_port = match->wc.masks.tp_dst;
 
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_SCTP, spec, mask);
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_SCTP;
     } else if (proto == IPPROTO_ICMP) {
         struct rte_flow_item_icmp *spec, *mask;
 
-        spec = xzalloc(sizeof *spec);
-        mask = xzalloc(sizeof *mask);
+        spec = CONST_CAST(typeof(spec), pattern[ICMP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[ICMP].mask);
 
         spec->hdr.icmp_type = (uint8_t) ntohs(match->flow.tp_src);
         spec->hdr.icmp_code = (uint8_t) ntohs(match->flow.tp_dst);
@@ -615,11 +812,26 @@ netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
         mask->hdr.icmp_type = (uint8_t) ntohs(match->wc.masks.tp_src);
         mask->hdr.icmp_code = (uint8_t) ntohs(match->wc.masks.tp_dst);
 
-        add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_ICMP, spec, mask);
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_ICMP;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
     }
 
-    add_flow_pattern(patterns, RTE_FLOW_ITEM_TYPE_END, NULL, NULL);
+    *patterns = pattern;
     return 0;
+}
+
+int
+netdev_dpdk_flow_patterns_add(struct rte_flow_item **patterns,
+                              const struct match *match,
+                              struct offload_info *info)
+{
+
+    if (is_vxlan_flow(match, info))
+        return netdev_dpdk_vxlan_patterns_add(patterns, match, info);
+
+    return netdev_dpdk_normal_patterns_add(patterns, match);
 }
 
 static void
@@ -876,6 +1088,10 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
     struct nlattr *nla;
     size_t left;
 
+    if (info->need_decap) {
+        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_DECAP, NULL);
+    }
+
     NL_ATTR_FOR_EACH_UNSAFE (nla, left, nl_actions, nl_actions_len) {
         if (nl_attr_type(nla) == OVS_ACTION_ATTR_OUTPUT &&
             left <= NLA_ALIGN(nla->nla_len)) {
@@ -892,7 +1108,8 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
                                                  set_actions_len, masked)) {
                 return -1;
             }
-        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_CLONE) {
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_CLONE &&
+                left <= NLA_ALIGN(nla->nla_len)) {
             const struct nlattr *clone_actions = nl_attr_get(nla);
             size_t clone_actions_len = nl_attr_get_size(nla);
 

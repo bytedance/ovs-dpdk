@@ -130,13 +130,14 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
         .egress = 0,
         .transfer = 1
     };
-    struct flow_patterns patterns = { .items = NULL, .cnt = 0 };
+
+    struct rte_flow_item *patterns;
     struct flow_actions actions = { .actions = NULL, .cnt = 0 };
     struct rte_flow_error error;
     struct rte_flow *flow;
     int ret = 0;
 
-    ret = netdev_dpdk_flow_patterns_add(&patterns, match);
+    ret = netdev_dpdk_flow_patterns_add(&patterns, match, info);
     if (ret) {
         VLOG_WARN("Adding rte match patterns for flow ufid"UUID_FMT" failed",
                   UUID_ARGS((struct uuid *)ufid));
@@ -161,7 +162,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
     }
 
     flow = netdev_dpdk_rte_flow_create(netdev, &flow_attr,
-                                       patterns.items,
+                                       patterns,
                                        actions.actions, &error);
 
     if (!flow) {
@@ -176,7 +177,6 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
              netdev_get_name(netdev), flow, UUID_ARGS((struct uuid *)ufid));
 
 out:
-    netdev_dpdk_flow_patterns_free(&patterns);
     netdev_dpdk_flow_actions_free(&actions);
     return ret;
 }
@@ -192,11 +192,6 @@ netdev_offload_dpdk_validate_flow(const struct match *match)
 
     /* Create a wc-zeroed version of flow. */
     match_init(&match_zero_wc, &match->flow, &match->wc);
-
-    if (!is_all_zeros(&match_zero_wc.flow.tunnel,
-                      sizeof match_zero_wc.flow.tunnel)) {
-        goto err;
-    }
 
     if (masks->metadata || masks->skb_priority ||
         masks->pkt_mark || masks->dp_hash) {

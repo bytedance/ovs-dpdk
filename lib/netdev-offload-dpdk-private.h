@@ -23,28 +23,16 @@
 
 struct netdev;
 
-/*
- * To avoid individual xrealloc calls for each new element, a 'curent_max'
- * is used to keep track of current allocated number of elements. Starts
- * by 8 and doubles on each xrealloc call.
- */
-struct flow_patterns {
-    struct rte_flow_item *items;
-    int cnt;
-    int current_max;
-};
-
 struct flow_actions {
     struct rte_flow_action *actions;
     int cnt;
     int current_max;
 };
 
-void
-netdev_dpdk_flow_patterns_free(struct flow_patterns *patterns);
 int
-netdev_dpdk_flow_patterns_add(struct flow_patterns *patterns,
-                              const struct match *match);
+netdev_dpdk_flow_patterns_add(struct rte_flow_item **patterns,
+                              const struct match *match,
+                              struct offload_info *info);
 void
 netdev_dpdk_flow_actions_free(struct flow_actions *actions);
 void
