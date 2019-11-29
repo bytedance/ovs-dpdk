@@ -217,10 +217,6 @@ netdev_vport_construct(struct netdev *netdev_)
 
     dev->tnl_cfg.dont_fragment = true;
     dev->tnl_cfg.ttl = DEFAULT_TTL;
-
-    hmap_init(&dev->ingress_flows);
-    hmap_init(&dev->tnl_pop_flows);
-    ovs_rwlock_init(&dev->rwlock);
     return 0;
 }
 
@@ -236,10 +232,6 @@ netdev_vport_destruct(struct netdev *netdev_)
 
     free(netdev->peer);
     ovs_mutex_destroy(&netdev->mutex);
-
-    hmap_destroy(&netdev->ingress_flows);
-    hmap_destroy(&netdev->tnl_pop_flows);
-    ovs_rwlock_destroy(&netdev->rwlock);
 }
 
 static void

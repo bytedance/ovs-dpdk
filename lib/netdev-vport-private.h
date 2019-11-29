@@ -40,10 +40,6 @@ struct netdev_vport {
 
     /* Patch Ports. */
     char *peer;
-
-    struct ovs_rwlock rwlock;
-    struct hmap ingress_flows;
-    struct hmap tnl_pop_flows;
 };
 
 int netdev_vport_construct(struct netdev *);

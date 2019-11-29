@@ -345,10 +345,12 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
     memset(stats, 0, sizeof *stats);
     ret = netdev_dpdk_rte_flow_query(netdev, rte_flow, &query, &error);
     if (ret) {
+        /* 
         VLOG_DBG("ufid "UUID_FMT
                  " flow %p query for '%s' failed\n",
                  UUID_ARGS((struct uuid *)ufid), rte_flow,
                  netdev_get_name(netdev));
+        */
         return -1;
     }
     stats->n_packets += (query.hits_set) ? query.hits : 0;

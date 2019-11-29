@@ -228,6 +228,25 @@ ds_put_flow_pattern(struct ds *s, const struct rte_flow_item *item)
         } else {
             ds_put_cstr(s, "  Mask = null\n");
         }
+    } else if (item->type == RTE_FLOW_ITEM_TYPE_VXLAN) {
+        const struct rte_flow_item_vxlan *vxlan_spec = item->spec;
+        const struct rte_flow_item_vxlan *vxlan_mask = item->mask;
+        ds_put_cstr(s, "rte flow vxlan pattern:\n");
+
+        uint32_t vni;
+        memcpy(&vni, vxlan_spec->vni, sizeof(vxlan_spec->vni));
+        ds_put_format(s,
+                        "  Spec: vni=%"PRIx32"\n",
+                        vni);
+        if (vxlan_mask) {
+            memcpy(&vni, vxlan_mask->vni, sizeof(vxlan_mask->vni));
+            ds_put_format(s,
+                    "  Mask: vni=%"PRIx32"\n",
+                    vni);
+        } else {
+            ds_put_cstr(s, "  Mask = null\n");
+        }
+        
     } else {
         ds_put_format(s, "unknown rte flow pattern (%d)\n", item->type);
     }
@@ -334,6 +353,9 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Raw-encap = null\n");
         }
+    } else if (actions->type == RTE_FLOW_ACTION_TYPE_RAW_DECAP) {
+        const struct rte_flow_action_raw_decap *raw_decap = actions->conf;
+        ds_put_format(s, "rte flow raw_decap action: pop %"PRIu64"\n", raw_decap->size);
     } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_SRC ||
                actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_DST) {
         const struct rte_flow_action_set_tp *set_tp = actions->conf;
@@ -363,6 +385,11 @@ netdev_dpdk_flow_ds_put_flow(struct ds *s,
         ds_put_flow_attr(s, attr);
     }
     while (items && items->type != RTE_FLOW_ITEM_TYPE_END) {
+        if (items->type == RTE_FLOW_ITEM_TYPE_VOID) {
+            ds_put_cstr(s, "void pattern: skip\n");
+            items ++;
+            continue;
+        }
         ds_put_flow_pattern(s, items++);
     }
     while (actions && actions->type != RTE_FLOW_ACTION_TYPE_END) {
@@ -549,7 +576,7 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
     {
         struct rte_flow_item_vxlan *spec;
         spec = CONST_CAST(typeof(spec), pattern[VXLAN].spec);
-        ovs_be64 tun_id = match->flow.tunnel.tun_id;
+        ovs_be64 tun_id = ntohll(match->flow.tunnel.tun_id);
 
         spec->vni[0] = tun_id & 0xff;
         spec->vni[1] = (tun_id >> 8) & 0xff;
@@ -602,7 +629,7 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
     static struct rte_flow_item_sctp sctp_spec;
     static struct rte_flow_item_sctp sctp_mask;
 
-    enum {ETH, VLAN, IPV4, TCP, UDP, ICMP, SCTP, IEND};
+    enum {ETH, VLAN, IPV4, TCP, UDP, ICMP, SCTP, END};
     static struct rte_flow_item pattern[] = {
         [ETH] = {
             .type = RTE_FLOW_ITEM_TYPE_ETH,
@@ -646,7 +673,7 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
             .mask = &sctp_mask,
             .last = NULL,
         },
-        [IEND] = {
+        [END] = {
             .type = RTE_FLOW_ITEM_TYPE_END,
             .spec = NULL,
             .mask = NULL,
@@ -816,7 +843,13 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
         pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
         pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_ICMP;
         pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+    } else {
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
     }
+    
 
     *patterns = pattern;
     return 0;
@@ -1079,6 +1112,7 @@ netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
     return 0;
 }
 
+#define VXLAN_HEADER_SIZE 50
 int
 netdev_dpdk_flow_actions_add(struct flow_actions *actions,
                              struct nlattr *nl_actions,
@@ -1089,7 +1123,13 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
     size_t left;
 
     if (info->need_decap) {
-        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_DECAP, NULL);
+        if (info->vport_type == VPORT_VXLAN) {
+            struct rte_flow_action_raw_decap *raw_decap =
+                xzalloc(sizeof *raw_decap);
+
+            raw_decap->size = VXLAN_HEADER_SIZE;
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_DECAP, raw_decap);
+        }
     }
 
     NL_ATTR_FOR_EACH_UNSAFE (nla, left, nl_actions, nl_actions_len) {
