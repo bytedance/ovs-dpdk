@@ -56,6 +56,7 @@
 #include "openvswitch/vlog.h"
 #include "flow.h"
 #include "util.h"
+#include "cmap.h"
 #ifdef __linux__
 #include "tc.h"
 #endif
@@ -422,6 +423,7 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                     seq_read(netdev->reconfigure_seq);
                 ovsrcu_set(&netdev->flow_api, NULL);
                 netdev->hw_info.oor = false;
+                cmap_init(&netdev->hw_info.hw_flows);
                 netdev->node = shash_add(&netdev_shash, name, netdev);
 
                 /* By default enable one tx and rx queue per netdev. */
@@ -580,6 +582,7 @@ netdev_unref(struct netdev *dev)
         }
         free(dev->name);
         seq_destroy(dev->reconfigure_seq);
+        cmap_destroy(&dev->hw_info.hw_flows);
         dev->netdev_class->dealloc(dev);
         ovs_mutex_unlock(&netdev_mutex);
 

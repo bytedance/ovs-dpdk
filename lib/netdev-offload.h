@@ -22,6 +22,7 @@
 #include "openvswitch/types.h"
 #include "packets.h"
 #include "flow.h"
+#include "cmap.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -45,6 +46,7 @@ struct netdev_hw_info {
     bool oor;		/* Out of Offload Resources ? */
     int offload_count;  /* Pending (non-offloaded) flow count */
     int pending_count;  /* Offloaded flow count */
+    struct cmap hw_flows;
 };
 
 enum hw_info_type {

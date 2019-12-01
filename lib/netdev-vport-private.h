@@ -40,6 +40,7 @@ struct netdev_vport {
 
     /* Patch Ports. */
     char *peer;
+    void *offload_aux;
 };
 
 int netdev_vport_construct(struct netdev *);

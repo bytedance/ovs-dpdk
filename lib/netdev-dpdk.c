@@ -1373,6 +1373,8 @@ netdev_dpdk_destruct(struct netdev *netdev)
     bool remove_on_close;
 
     ovs_mutex_lock(&dpdk_mutex);
+    /* flush all offloaded flows */
+    netdev_flow_flush(netdev);
 
     rte_eth_dev_stop(dev->port_id);
     dev->started = false;

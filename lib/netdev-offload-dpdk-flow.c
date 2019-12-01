@@ -233,8 +233,12 @@ ds_put_flow_pattern(struct ds *s, const struct rte_flow_item *item)
         const struct rte_flow_item_vxlan *vxlan_mask = item->mask;
         ds_put_cstr(s, "rte flow vxlan pattern:\n");
 
-        uint32_t vni;
-        memcpy(&vni, vxlan_spec->vni, sizeof(vxlan_spec->vni));
+        uint32_t vni = 0;
+        vni = vni | vxlan_spec->vni[2];
+        vni = (vni << 8) | vxlan_spec->vni[1];
+        vni = (vni << 8) | vxlan_spec->vni[0];
+        vni = vni << 8;
+        vni = RTE_BE32(vni);
         ds_put_format(s,
                         "  Spec: vni=%"PRIx32"\n",
                         vni);
@@ -576,7 +580,8 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
     {
         struct rte_flow_item_vxlan *spec;
         spec = CONST_CAST(typeof(spec), pattern[VXLAN].spec);
-        ovs_be64 tun_id = ntohll(match->flow.tunnel.tun_id);
+        ovs_be32 tun_id = (ovs_be32)(ntohll(match->flow.tunnel.tun_id));
+        tun_id = RTE_BE32(tun_id) >> 8;
 
         spec->vni[0] = tun_id & 0xff;
         spec->vni[1] = (tun_id >> 8) & 0xff;
@@ -764,12 +769,13 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
         (match->wc.masks.tp_src ||
          match->wc.masks.tp_dst ||
          match->wc.masks.tcp_flags)) {
-        VLOG_DBG("L4 Protocol (%u) not supported", proto);
+        VLOG_DBG("L4 Protocol (%u) not supported\n", proto);
         return -1;
     }
 
     if ((match->wc.masks.tp_src && match->wc.masks.tp_src != OVS_BE16_MAX) ||
         (match->wc.masks.tp_dst && match->wc.masks.tp_dst != OVS_BE16_MAX)) {
+        VLOG_DBG("L4 port only support exact match\n");
         return -1;
     }
 

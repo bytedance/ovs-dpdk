@@ -455,7 +455,6 @@ struct dp_netdev_port {
     bool emc_enabled;           /* If true EMC will be used. */
     char *type;                 /* Port type as requested by user. */
     char *rxq_affinity_list;    /* Requested affinity of rx queues. */
-    void *offload_aux;
 };
 
 /* Contained by struct dp_netdev_flow's 'stats' member.  */
@@ -471,7 +470,6 @@ enum offload_status {
     OFFLOAD_FAILED,  /* tried but failed, not need to try again */
     OFFLOAD_MASK,    /* mask offloaded */
     OFFLOAD_FULL,    /* full offloaded */ 
-    OFFLOAD_INGRESS, /* ingress offloaded */
 };
 
 /* A flow in 'dp_netdev_pmd_thread's 'flow_table'.
@@ -1882,13 +1880,6 @@ port_create(const char *devname, const char *type,
     port->emc_enabled = true;
     port->need_reconfigure = true;
     ovs_mutex_init(&port->txq_used_mutex);
-
-    if (netdev_vport_is_vport_class(netdev_get_class(netdev))) {
-        if (netdev_get_tunnel_config(netdev)) {
-            port->offload_aux = tnl_offload_aux_new();
-        }
-    }
-
     *portp = port;
 
     return 0;
@@ -1948,10 +1939,35 @@ dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev,
         *port_nop = port_no;
         error = do_add_port(dp, dpif_port, netdev_get_type(netdev), port_no);
     }
+
+    if (netdev_vport_is_vport_class(netdev_get_class(netdev))) {
+        if (netdev_get_tunnel_config(netdev)) {
+            struct netdev_vport *vport = netdev_vport_cast(netdev);
+            vport->offload_aux = tnl_offload_aux_new();
+        }
+    }
     ovs_mutex_unlock(&dp->port_mutex);
 
     return error;
 }
+
+static void ingress_flow_flush(struct tnl_offload_aux *aux);
+static void tnlflow_flush(struct tnl_offload_aux *aux);
+
+/* tnl pop ingress flow */
+struct ingress_flow {
+    struct dp_netdev_flow *flow;
+    struct netdev *ingress_netdev;
+    enum offload_status status;
+    struct hmap_node node;
+};
+
+/* tnl pop flow */
+struct tnl_pop_flow {
+    struct dp_netdev_flow *flow;
+    enum offload_status status;
+    struct hmap_node node;
+};
 
 static int
 dpif_netdev_port_del(struct dpif *dpif, odp_port_t port_no)
@@ -1971,6 +1987,35 @@ dpif_netdev_port_del(struct dpif *dpif, odp_port_t port_no)
         }
     }
     ovs_mutex_unlock(&dp->port_mutex);
+
+    if (!error) {
+        struct netdev *netdev = netdev_ports_get(port_no, dpif->dpif_class);
+        if (!netdev) {
+            return error;
+        }
+
+        if (netdev_vport_is_vport_class(netdev_get_class(netdev))){
+            struct netdev_vport *vport = netdev_vport_cast(netdev);
+            if (vport->offload_aux) {
+                struct tnl_offload_aux *aux = vport->offload_aux;
+                struct ingress_flow *inflow;
+                struct tnl_pop_flow *tnlflow;
+                HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
+                    atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
+                            memory_order_release);
+                }
+                HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
+                    atomic_store_explicit(&tnlflow->flow->status, OFFLOAD_NONE, \
+                            memory_order_release);
+                }
+                ingress_flow_flush(aux);
+                tnlflow_flush(aux);
+                tnl_offload_aux_free(vport->offload_aux);
+                vport->offload_aux = NULL;
+            }
+        }
+        netdev_close(netdev);
+    }
 
     return error;
 }
@@ -2009,52 +2054,11 @@ get_port_by_number(struct dp_netdev *dp,
     }
 }
 
-/* tnl pop ingress flow */
-struct ingress_flow {
-    struct dp_netdev_flow *flow;
-    struct netdev *ingress_netdev;
-    enum offload_status status;
-    struct hmap_node node;
-};
-
-/* tnl pop flow */
-struct tnl_pop_flow {
-    struct dp_netdev_flow *flow;
-    enum offload_status status;
-    struct hmap_node node;
-};
-
-static void ingress_flow_op_flush(struct ingress_flow *inflow, \
-                                  struct tnl_offload_aux *aux);
-static void ingress_flow_flush(struct tnl_offload_aux *aux);
-static void tnlflow_flush(struct tnl_offload_aux *aux);
-
-
 static void
 port_destroy(struct dp_netdev_port *port)
 {
     if (!port) {
         return;
-    }
-
-    if (netdev_vport_is_vport_class(netdev_get_class(port->netdev))){
-        if (port->offload_aux) {
-            struct tnl_offload_aux *aux = port->offload_aux;
-            struct ingress_flow *inflow;
-            struct tnl_pop_flow *tnlflow;
-            HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-                ingress_flow_op_flush(inflow, aux);
-                atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
-                                        memory_order_release);
-            }
-            HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-                atomic_store_explicit(&tnlflow->flow->status, OFFLOAD_NONE, \
-                                        memory_order_release);
-            }
-            ingress_flow_flush(aux);
-            tnlflow_flush(aux);
-            tnl_offload_aux_free(port->offload_aux);
-        }
     }
 
     netdev_close(port->netdev);
@@ -2312,6 +2316,7 @@ ingress_flow_find(struct dp_netdev_flow *flow,\
 static void
 ingress_flow_free(struct ingress_flow *inflow)
 {
+    netdev_close(inflow->ingress_netdev);
     free(inflow);
 }
 
@@ -2335,6 +2340,7 @@ ingress_flow_new(struct dp_netdev_flow *flow, \
     inflow = xzalloc(sizeof(struct ingress_flow));
     inflow->ingress_netdev = inport;
     inflow->flow = flow;
+    netdev_ref(inport);
     return inflow;
 }
 
@@ -2385,7 +2391,17 @@ tnl_pop_flow_op_put(struct ingress_flow *inflow,\
 
     ovs_u128 mega_ufid;
     tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-    info->need_decap = 1;
+
+    if (act->size > 0 && dp_netdev_action_get(act->actions, act->size, \
+                    OVS_ACTION_ATTR_OUTPUT)) {
+        info->need_decap = 1;
+    } else {
+        /* does not has output, might be drop.
+         * accoridng to mlnx dpdk, decap and drop
+         * cannot co-exist
+         */
+        info->need_decap = 0;
+    }
 
     ret = netdev_flow_put(inflow->ingress_netdev, &tnl_m,
             act->actions, act->size, &mega_ufid, info,
@@ -2550,7 +2566,7 @@ tnlflow_insert(struct tnl_offload_aux *aux, \
     ovs_rwlock_unlock(&aux->rwlock);
 }
 
-static struct tnl_offload_aux *
+static struct netdev *
 try_ingress(struct dp_netdev_actions *act, \
             struct dp_netdev *dp)
 {
@@ -2562,12 +2578,11 @@ try_ingress(struct dp_netdev_actions *act, \
     }
 
     odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
-    struct dp_netdev_port *tnl_port = dp_netdev_lookup_port(dp, portno);
-    if (!tnl_port) {
+    struct netdev *tnl_dev = netdev_ports_get(portno, dp->class);
+    if (!tnl_dev) {
         return NULL;
     }
-
-    return tnl_port->offload_aux;
+    return tnl_dev;
 }
 
 static int 
@@ -2575,10 +2590,12 @@ try_del_ingress(struct dp_netdev_flow *flow,\
                 struct dp_netdev_actions *act, \
                 struct dp_netdev *dp)
 {
-    struct tnl_offload_aux *aux = try_ingress(act, dp);
-    if (!aux) {
+    struct netdev *tnl_dev = try_ingress(act, dp);
+    if (!tnl_dev) {
         return -1;
     }
+    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
+    struct tnl_offload_aux *aux  = vport->offload_aux;
     // get old act and get vport 
     bool found;
     struct ingress_flow *inflow = ingress_flow_find(flow, aux, &found);
@@ -2588,21 +2605,32 @@ try_del_ingress(struct dp_netdev_flow *flow,\
         atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
                         memory_order_release);
         ingress_flow_del(inflow, aux);
+        netdev_close(tnl_dev);
         return 0;
     }
+    netdev_close(tnl_dev);
     return -1;
 }
 
 static bool
 try_tnlflow(struct dp_netdev_flow *flow, \
-            struct dp_netdev_port *inport)
+            struct netdev *inport)
 {
     if(!flow_tnl_dst_is_set(&flow->flow.tunnel)) {
         return false;
     }
+    
+    if (!netdev_vport_is_vport_class(netdev_get_class(inport))) {
+        return false;
+    }
 
-    if (!inport->offload_aux || \
-            !netdev_get_tunnel_config(inport->netdev)) {
+    if (!netdev_get_tunnel_config(inport)) {
+        return false;
+    }
+
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+
+    if (!vport->offload_aux) {
         return false;
     }
     return true;
@@ -2610,7 +2638,7 @@ try_tnlflow(struct dp_netdev_flow *flow, \
 
 static int 
 try_del_tnlflow(struct dp_netdev_flow *flow, \
-                struct dp_netdev_port *inport)
+                struct netdev *inport)
 {
     bool is_tnlflow = try_tnlflow(flow, inport);
     if (!is_tnlflow) {
@@ -2619,7 +2647,8 @@ try_del_tnlflow(struct dp_netdev_flow *flow, \
 
     struct tnl_pop_flow *tnlflow;
     bool found; 
-    struct tnl_offload_aux * aux = inport->offload_aux;
+    struct netdev_vport * vport = netdev_vport_cast(inport);
+    struct tnl_offload_aux * aux = vport->offload_aux;
     tnlflow = tnlflow_find(flow, aux, &found);
     if (found) {
        tnlflow_op_flush(tnlflow, aux); 
@@ -2634,30 +2663,31 @@ try_del_tnlflow(struct dp_netdev_flow *flow, \
 static int
 dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 {
-    struct dp_netdev_port *port;
+    struct netdev *netdev;
     struct dp_netdev_flow *flow = offload->flow;
     odp_port_t in_port = flow->flow.in_port.odp_port;
     struct dp_netdev *dp = offload->dp;
     int ret = -1;
 
-    ovs_mutex_lock(&dp->port_mutex);
-    port = dp_netdev_lookup_port(dp, in_port);
-    if (port) {
-        ret = try_del_ingress(flow, offload->dp_act, dp); 
-        if (!ret) {
-            goto exit;
-        }
-        ret = try_del_tnlflow(flow, port);
-        if (!ret) {
-            goto exit;
-        }
-        ret = netdev_flow_del(port->netdev, &flow->mega_ufid, NULL);
-        /* ignore ret */
-        atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
-                            memory_order_release);
+    netdev = netdev_ports_get(in_port, dp->class);
+    if (!netdev) {
+        return -1;
     }
+
+    ret = try_del_ingress(flow, offload->dp_act, dp); 
+    if (!ret) {
+        goto exit;
+    }
+    ret = try_del_tnlflow(flow, netdev);
+    if (!ret) {
+        goto exit;
+    }
+    ret = netdev_flow_del(netdev, &flow->mega_ufid, NULL);
+    /* ignore ret */
+    atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
+            memory_order_release);
 exit:
-    ovs_mutex_unlock(&dp->port_mutex);
+    netdev_close(netdev);
     if (ret) {
         return -1;
     }
@@ -2666,7 +2696,7 @@ exit:
 
 static enum offload_status
 dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
-                              struct dp_netdev_port *inport, \
+                              struct netdev *inport, \
                               struct dp_flow_offload_item *offload, \
                               struct offload_info *info)
 {
@@ -2684,7 +2714,8 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     struct dp_netdev_actions *act = offload->dp_act;
 
     bool found;
-    struct tnl_offload_aux * aux = inport->offload_aux;
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+    struct tnl_offload_aux * aux = vport->offload_aux;
     if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD) {
         tnlflow = tnlflow_find(flow, aux, &found);
         if (found)
@@ -2732,7 +2763,6 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
 
 static enum offload_status
 dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
-                                  struct dp_netdev *dp, \
                                   struct netdev *inport,\
                                   struct dp_flow_offload_item *offload, \
                                   struct offload_info *info)
@@ -2745,12 +2775,12 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     }
 
     odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
-    struct dp_netdev_port *tnl_port = dp_netdev_lookup_port(dp, portno);
-    if (!tnl_port) {
+    struct netdev *tnl_dev = netdev_ports_get(portno, info->dpif_class);
+    if (!tnl_dev) {
         return OFFLOAD_FAILED;
     }
-
-    struct tnl_offload_aux *aux = tnl_port->offload_aux;
+    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
+    struct tnl_offload_aux *aux = vport->offload_aux;
     struct ingress_flow *inflow;
     bool found;
     inflow = ingress_flow_find(flow, aux, &found);
@@ -2758,6 +2788,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
      * pmd thread flow table
      */
     if (found) {
+        netdev_close(tnl_dev);
         return inflow->flow->status;
     }
 
@@ -2771,6 +2802,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
         ingress_flow_free(inflow);
     }
 
+    netdev_close(tnl_dev);
     return status;
 }
 
@@ -2782,7 +2814,7 @@ dp_netdev_try_offload_ingress(struct dp_netdev_flow *flow,\
                               struct offload_info *info)
 {
     if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD)
-        return dp_netdev_try_offload_ingress_add(flow, dp, inport, offload, info);
+        return dp_netdev_try_offload_ingress_add(flow, inport, offload, info);
 
     if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD) {
         struct dp_netdev_actions *act = offload->old_dp_act;
@@ -2810,13 +2842,32 @@ dp_netdev_normal_offload(struct dp_netdev_flow *flow, \
     return ret;
 }
 
+static bool
+offload_check_action(struct dp_netdev_actions *act, \
+                     struct dp_netdev *dp)
+{
+    const struct nlattr *output = dp_netdev_action_get(act->actions, \
+                                            act->size, \
+                                            OVS_ACTION_ATTR_OUTPUT);
+    if (output) {
+        /* output port cannot be internal port */
+        odp_port_t portno = nl_attr_get_odp_port(output);
+        struct netdev *dev = netdev_ports_get(portno, dp->class);
+        if (!dev) {
+            return false;
+        }
+        netdev_close(dev);
+    }
+
+    return true;
+}
+
 static int
 dp_netdev_try_offload(struct dp_flow_offload_item *offload)
 {
     struct dp_netdev *dp = offload->dp;
     struct dp_netdev_flow *flow = offload->flow;
     odp_port_t in_port = flow->flow.in_port.odp_port;
-    struct dp_netdev_port *port;
     struct offload_info info;
     
     memset(&info, 0, sizeof(info));
@@ -2827,16 +2878,13 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
         return -1;
     }
 
-    ovs_mutex_lock(&dp->port_mutex);
-    port = dp_netdev_lookup_port(dp, in_port);
-    if (!port) {
-        ovs_mutex_unlock(&dp->port_mutex);
+    struct netdev *netdev = netdev_ports_get(in_port, dpif_class);
+    if (!netdev) {
         return -1;
     }
-    
-    struct netdev *netdev = port->netdev;
-    if (!strcmp(netdev_get_type(netdev), "internal")) {
-        ovs_mutex_unlock(&dp->port_mutex);
+
+    if (!offload_check_action(offload->dp_act, dp)) {
+        netdev_close(netdev);
         return -1;
     }
 
@@ -2848,7 +2896,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
         goto exit;
     }
 
-    status = dp_netdev_try_offload_tnl_pop(flow, port, offload, &info);
+    status = dp_netdev_try_offload_tnl_pop(flow, netdev, offload, &info);
     if (status != OFFLOAD_NONE) {
         atomic_store_explicit(&flow->status, status, memory_order_release);
         goto exit;
@@ -2859,7 +2907,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     atomic_store_explicit(&flow->status, status, memory_order_release);
 
 exit:
-    ovs_mutex_unlock(&dp->port_mutex);
+    netdev_close(netdev);
     return ret;
 }
  
@@ -4041,11 +4089,13 @@ try_ingress_stats(struct dp_netdev_flow *flow, \
                   struct dp_netdev *dp, \
                   struct dpif_flow_stats *stats)
 {
-    struct tnl_offload_aux *aux = \
+    struct netdev *tnl_dev = \
                         try_ingress(act, dp);
-    if (!aux) {
+    if (!tnl_dev) {
         return -1;
     }
+    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);  
+    struct tnl_offload_aux *aux = vport->offload_aux;
 
     bool found;
     struct ingress_flow *inflow = \
@@ -4066,14 +4116,16 @@ try_ingress_stats(struct dp_netdev_flow *flow, \
             }
         }
         ovs_rwlock_unlock(&aux->rwlock);
+        netdev_close(tnl_dev);
         return 0;
     }
+    netdev_close(tnl_dev);
     return -1;
 }
 
 static int
 try_tnlflow_stats(struct dp_netdev_flow *flow, \
-                  struct dp_netdev_port *inport, \
+                  struct netdev *inport, \
                   struct dpif_flow_stats *stats)
 {
     bool is_tnlflow = try_tnlflow(flow, inport);
@@ -4081,7 +4133,8 @@ try_tnlflow_stats(struct dp_netdev_flow *flow, \
         return -1;
 
     bool found;
-    struct tnl_offload_aux *aux = inport->offload_aux;
+    struct netdev_vport *vport = netdev_vport_cast(inport);
+    struct tnl_offload_aux *aux = vport->offload_aux;
     struct tnl_pop_flow *tnlflow = \
                         tnlflow_find(flow, aux, &found);
     if (found) {
@@ -4109,15 +4162,13 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
                          struct dp_netdev_pmd_thread *pmd)
 {
     int ret;
-    struct dp_netdev_port *port;
+    struct netdev *port;
     struct dpif_flow_stats stats;
 
     odp_port_t in_port = netdev_flow->flow.in_port.odp_port;
 
-    ovs_mutex_lock(&pmd->dp->port_mutex);
-    port = dp_netdev_lookup_port(pmd->dp, in_port);
+    port = netdev_ports_get(in_port, pmd->dp->class);
     if (!port) {
-        ovs_mutex_unlock(&pmd->dp->port_mutex);
         return -1;
     }
     /* get offloaded stats */
@@ -4136,9 +4187,9 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
         goto exit;
     }
 
-    ret = netdev_flow_stats_get(port->netdev, &netdev_flow->mega_ufid, &stats);
+    ret = netdev_flow_stats_get(port, &netdev_flow->mega_ufid, &stats);
 exit:
-    ovs_mutex_unlock(&pmd->dp->port_mutex);
+    netdev_close(port);
     if (ret) {
         return -1;
     }
