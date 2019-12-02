@@ -238,6 +238,9 @@ static void
 netdev_vport_dealloc(struct netdev *netdev_)
 {
     struct netdev_vport *netdev = netdev_vport_cast(netdev_);
+    if (netdev->offload_aux && netdev->offload_aux_free) {
+        netdev->offload_aux_free(netdev->offload_aux);
+    }
     free(netdev);
 }
 
