@@ -2290,14 +2290,14 @@ ingress_flow_free(struct ingress_flow *inflow)
 
 static void
 ingress_flow_del(struct ingress_flow *inflow,\
-                 struct tnl_offload_aux *aux)
+                 struct tnl_offload_aux *aux, \
+                 struct netdev *vport)
 {
-    struct netdev_vport *vport = CONTAINER_OF(aux, struct netdev_vport, offload_aux);
-    netdev_close(&vport->up);
     ovs_rwlock_wrlock(&aux->rwlock);
     hmap_remove(&aux->ingress_flows, &inflow->node);
     ovs_rwlock_unlock(&aux->rwlock);
 
+    netdev_close(vport);
     ingress_flow_free(inflow);
 }
 
@@ -2315,14 +2315,14 @@ ingress_flow_new(struct dp_netdev_flow *flow, \
 
 static void
 ingress_flow_insert(struct tnl_offload_aux *aux,
-                    struct ingress_flow *inflow)
+                    struct ingress_flow *inflow,
+                    struct netdev *vport)
 {
-    struct netdev_vport *vport = CONTAINER_OF(aux, struct netdev_vport, offload_aux);
-    netdev_ref(&vport->up);
     ovs_rwlock_wrlock(&aux->rwlock);
     hmap_insert(&aux->ingress_flows, &inflow->node, \
                 dp_netdev_flow_hash(&inflow->flow->mega_ufid)); 
     ovs_rwlock_unlock(&aux->rwlock);
+    netdev_ref(vport);
 }
 
 static int 
@@ -2565,7 +2565,7 @@ try_del_ingress(struct dp_netdev_flow *flow,\
         ingress_flow_op_flush(inflow, aux);
         atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
                         memory_order_release);
-        ingress_flow_del(inflow, aux);
+        ingress_flow_del(inflow, aux, tnl_dev);
         netdev_close(tnl_dev);
         return 0;
     }
@@ -2762,7 +2762,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     enum offload_status status;
     status = try_offload_tnl_pop(inflow, aux, info);
     if (status == OFFLOAD_FULL) {
-        ingress_flow_insert(aux, inflow);
+        ingress_flow_insert(aux, inflow, tnl_dev);
     } else {
         ingress_flow_free(inflow);
     }
@@ -2808,23 +2808,78 @@ dp_netdev_normal_offload(struct dp_netdev_flow *flow, \
 }
 
 static bool
+is_port_tap(odp_port_t portno, const struct dpif_class *const class)
+{
+    struct netdev *dev = netdev_ports_get(portno, class);
+    if (!dev) {
+        return true;
+    }
+    netdev_close(dev);
+    return false;
+}
+
+static void 
+check_clone_actions(const struct nlattr *clone_act, \
+                    const size_t act_size, \
+                    const struct dpif_class *const class, \
+                    bool *check_ret)
+{
+    const struct nlattr *a;
+    unsigned int left;
+    *check_ret = false;
+
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, clone_act, act_size) {
+        int _type = nl_attr_type(a);
+        if (_type == OVS_ACTION_ATTR_OUTPUT) {
+            /* "internal dev, tap dev, not offload */
+            odp_port_t portno = nl_attr_get_odp_port(a);
+            if (is_port_tap(portno, class)) {
+                return;
+            } else {
+                /* has fate action */
+                *check_ret = true;
+            }
+        }
+    }
+}
+
+static bool
 offload_check_action(struct dp_netdev_actions *act, \
                      struct dp_netdev *dp)
 {
-    const struct nlattr *output = dp_netdev_action_get(act->actions, \
-                                            act->size, \
-                                            OVS_ACTION_ATTR_OUTPUT);
-    if (output) {
-        /* output port cannot be internal port */
-        odp_port_t portno = nl_attr_get_odp_port(output);
-        struct netdev *dev = netdev_ports_get(portno, dp->class);
-        if (!dev) {
-            return false;
+    const struct nlattr *a;
+    unsigned int left;
+    bool offloadable = false;
+
+    NL_ATTR_FOR_EACH_UNSAFE (a, left, act->actions, act->size) {
+        int _type = nl_attr_type(a);
+        if (_type == OVS_ACTION_ATTR_OUTPUT) {
+            odp_port_t portno = nl_attr_get_odp_port(a);
+            /* tap dev not offload */
+            if (is_port_tap(portno, dp->class))
+                return false; 
+            else {
+                offloadable = true;
+            }
+        } else if (_type == OVS_ACTION_ATTR_CLONE) {
+            if (left <= NLA_ALIGN(a->nla_len)) {
+                const struct nlattr *clone_actions = nl_attr_get(a);
+                size_t clone_actions_len = nl_attr_get_size(a);
+                check_clone_actions(clone_actions, clone_actions_len, dp->class, &offloadable);
+            } else {
+                /* does not clone */
+                return false;
+            }
+        } else if (_type == OVS_ACTION_ATTR_TUNNEL_POP) {
+            offloadable = true;
         }
-        netdev_close(dev);
     }
 
-    return true;
+    if (act->size == 0) {
+        /* drop action */
+        offloadable = true;
+    }
+    return offloadable;
 }
 
 static int
@@ -4058,6 +4113,7 @@ static int
 try_ingress_stats(struct dp_netdev_flow *flow, \
                   struct dp_netdev_actions *act, \
                   struct dp_netdev *dp, \
+                  long long now, \
                   struct dpif_flow_stats *stats)
 {
     struct netdev *tnl_dev = \
@@ -4075,11 +4131,12 @@ try_ingress_stats(struct dp_netdev_flow *flow, \
         struct dpif_flow_stats _stats;
         struct tnl_pop_flow *tnlflow;
         int ret;
-
-        memset(stats, 0, sizeof(*stats));
+        _stats.used = now / 1000; 
 
         ovs_rwlock_rdlock(&aux->rwlock);
         HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
+            _stats.n_packets = 0;
+            _stats.n_bytes = 0;
             ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
             if (!ret) {
                 stats->n_packets += _stats.n_packets;
@@ -4097,6 +4154,7 @@ try_ingress_stats(struct dp_netdev_flow *flow, \
 static int
 try_tnlflow_stats(struct dp_netdev_flow *flow, \
                   struct netdev *inport, \
+                  long long now, \
                   struct dpif_flow_stats *stats)
 {
     bool is_tnlflow = try_tnlflow(flow, inport);
@@ -4110,16 +4168,19 @@ try_tnlflow_stats(struct dp_netdev_flow *flow, \
                         tnlflow_find(flow, aux, &found);
     if (found) {
         struct dpif_flow_stats _stats;
+        _stats.used = now / 1000; 
         int ret;
         struct ingress_flow *inflow;
         memset(stats, 0, sizeof(*stats));
 
         ovs_rwlock_rdlock(&aux->rwlock);
         HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
+            _stats.n_bytes = 0;
+            _stats.n_packets = 0;
             ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
             if (!ret) {
                 stats->n_packets += _stats.n_packets;
-                stats->n_bytes += _stats.n_packets;
+                stats->n_bytes += _stats.n_bytes;
             }
         }
         ovs_rwlock_unlock(&aux->rwlock);
@@ -4134,7 +4195,7 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
 {
     int ret;
     struct netdev *port;
-    struct dpif_flow_stats stats;
+    struct dpif_flow_stats stats = {0};
 
     odp_port_t in_port = netdev_flow->flow.in_port.odp_port;
 
@@ -4146,6 +4207,7 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
     ret = try_ingress_stats(netdev_flow, \
                         dp_netdev_flow_get_actions(netdev_flow),\
                         pmd->dp, \
+                        pmd->ctx.now, \
                         &stats);
     if (!ret) {
         goto exit;
@@ -4153,6 +4215,7 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
 
     ret = try_tnlflow_stats(netdev_flow, \
                             port, \
+                            pmd->ctx.now,\
                             &stats);
     if (!ret) {
         goto exit;

@@ -54,11 +54,11 @@ struct ufid_to_rte_flow_data {
     struct cmap_node node;
     ovs_u128 ufid;
     struct rte_flow *rte_flow;
+    struct dpif_flow_stats stats;
 };
 
-/* Find rte_flow with @ufid. */
-static struct rte_flow *
-ufid_to_rte_flow_find(struct netdev* netdev, const ovs_u128 *ufid)
+static struct ufid_to_rte_flow_data * 
+ufid_to_flow_data_find(struct netdev *netdev, const ovs_u128 *ufid)
 {
     size_t hash = hash_bytes(ufid, sizeof *ufid, 0);
     struct ufid_to_rte_flow_data *data;
@@ -67,11 +67,21 @@ ufid_to_rte_flow_find(struct netdev* netdev, const ovs_u128 *ufid)
 
     CMAP_FOR_EACH_WITH_HASH (data, node, hash, hw_flows) {
         if (ovs_u128_equals(*ufid, data->ufid)) {
-            return data->rte_flow;
+            return data;
         }
     }
-
     return NULL;
+}
+
+/* Find rte_flow with @ufid. */
+static struct rte_flow *
+ufid_to_rte_flow_find(struct netdev* netdev, const ovs_u128 *ufid)
+{
+    struct ufid_to_rte_flow_data *data;
+    data = ufid_to_flow_data_find(netdev, ufid);
+    if (!data) 
+        return NULL;
+    return data->rte_flow;
 }
 
 static inline void
@@ -357,12 +367,17 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
     struct rte_flow *rte_flow;
     int ret;
 
-    rte_flow = ufid_to_rte_flow_find(netdev, ufid);
-    if (!rte_flow) {
+    struct ufid_to_rte_flow_data *fd = ufid_to_flow_data_find(netdev, ufid);
+    if (!fd)
         return -1;
+    rte_flow = fd->rte_flow;    
+
+    if (stats->used && fd->stats.used && stats->used == fd->stats.used) {
+        stats->n_packets += fd->stats.n_packets;
+        stats->n_bytes += fd->stats.n_bytes;
+        return 0;
     }
 
-    memset(stats, 0, sizeof *stats);
     ret = netdev_dpdk_rte_flow_query(netdev, rte_flow, &query, &error);
     if (ret) {
         VLOG_DBG("ufid "UUID_FMT
@@ -371,9 +386,15 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
                  netdev_get_name(netdev), error.type, error.message);
         return -1;
     }
+
     stats->n_packets += (query.hits_set) ? query.hits : 0;
     stats->n_bytes += (query.bytes_set) ? query.bytes : 0;
 
+    if (stats->used) { 
+        fd->stats.used = stats->used;
+        fd->stats.n_packets = (query.hits_set) ? query.hits : 0;
+        fd->stats.n_bytes = (query.bytes_set) ? query.bytes : 0;
+    }
     return 0;
 }
 

@@ -769,13 +769,13 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
         (match->wc.masks.tp_src ||
          match->wc.masks.tp_dst ||
          match->wc.masks.tcp_flags)) {
-        VLOG_DBG("L4 Protocol (%u) not supported\n", proto);
+        VLOG_ERR("L4 Protocol (%u) not supported\n", proto);
         return -1;
     }
 
     if ((match->wc.masks.tp_src && match->wc.masks.tp_src != OVS_BE16_MAX) ||
         (match->wc.masks.tp_dst && match->wc.masks.tp_dst != OVS_BE16_MAX)) {
-        VLOG_DBG("L4 port only support exact match\n");
+        VLOG_ERR("L4 port only support exact match\n");
         return -1;
     }
 
@@ -1171,6 +1171,7 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
     }
 
     if (nl_actions_len == 0) {
+        netdev_dpdk_flow_add_count_action(actions);
         add_flow_action(actions, RTE_FLOW_ACTION_TYPE_DROP, NULL);
     }
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
