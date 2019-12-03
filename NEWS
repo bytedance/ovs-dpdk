@@ -12,6 +12,7 @@ v2.13.0 - xx xxx xxxx
    - Userspace datapath:
      * Add option to enable, disable and query TCP sequence checking in
        conntrack.
+     * Add support for conntrack zone limits.
    - AF_XDP:
      * New option 'use-need-wakeup' for netdev-afxdp to control enabling
        of corresponding 'need_wakeup' flag in AF_XDP rings.  Enabled by default
