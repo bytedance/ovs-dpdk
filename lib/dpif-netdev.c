@@ -2318,11 +2318,11 @@ ingress_flow_insert(struct tnl_offload_aux *aux,
                     struct ingress_flow *inflow,
                     struct netdev *vport)
 {
+    netdev_ref(vport);
     ovs_rwlock_wrlock(&aux->rwlock);
     hmap_insert(&aux->ingress_flows, &inflow->node, \
                 dp_netdev_flow_hash(&inflow->flow->mega_ufid)); 
     ovs_rwlock_unlock(&aux->rwlock);
-    netdev_ref(vport);
 }
 
 static int 
