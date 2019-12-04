@@ -300,6 +300,22 @@ tnl_port_del(const struct ofport_dpif *ofport, odp_port_t odp_port)
     fat_rwlock_unlock(&rwlock);
 }
 
+void
+tnl_wc_init_by_port(const struct ofport_dpif *ofport, struct flow_wildcards *wc)
+{
+    struct tnl_port *tnl_port;
+
+    fat_rwlock_rdlock(&rwlock);
+    tnl_port = tnl_find_ofport(ofport);
+    if (tnl_port) {
+        if (tnl_port->match.ip_dst_flow) {
+            WC_UNMASK_FIELD(wc, tunnel.ip_src);
+            WC_UNMASK_FIELD(wc, tunnel.ipv6_src);
+        }
+    }
+    fat_rwlock_unlock(&rwlock);
+}
+
 /* Looks in the table of tunnels for a tunnel matching the metadata in 'flow'.
  * Returns the 'ofport' corresponding to the new in_port, or a null pointer if
  * none is found.

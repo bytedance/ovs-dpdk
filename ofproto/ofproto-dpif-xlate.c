@@ -7582,6 +7582,10 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         ctx.xin->xport_uuid = in_port->uuid;
     }
 
+    if (in_port && in_port->is_tunnel) {
+        tnl_wc_init_by_port(in_port->ofport, ctx.wc);
+    }
+
     if (flow->packet_type != htonl(PT_ETH) && in_port &&
         in_port->pt_mode == NETDEV_PT_LEGACY_L3 && ctx.table_id == 0) {
         /* Add dummy Ethernet header to non-L2 packet if it's coming from a
