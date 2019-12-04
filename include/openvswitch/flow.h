@@ -204,6 +204,8 @@ struct flow_wildcards {
     ((WC)->masks.FIELD |= (MASK))
 #define WC_UNMASK_FIELD(WC, FIELD) \
     memset(&(WC)->masks.FIELD, 0, sizeof (WC)->masks.FIELD)
+#define WC_FIELD_MASKED(WC, FIELD) \
+    ((WC)->masks.FIELD != 0)
 
 void flow_wildcards_init_catchall(struct flow_wildcards *);
 
