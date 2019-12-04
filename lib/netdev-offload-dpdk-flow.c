@@ -462,8 +462,6 @@ netdev_dpdk_flow_actions_add_mark_rss(struct flow_actions *actions,
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
 }
 
-#define VXLAN_DST_PORT 4789
-
 static int
 netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
                                 const struct match *match,
@@ -487,11 +485,7 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
 
     };
 
-    static struct rte_flow_item_udp udp_spec = {
-        .hdr = {
-            .dst_port = RTE_BE16(VXLAN_DST_PORT),
-        },
-    };
+    static struct rte_flow_item_udp udp_spec;
     static struct rte_flow_item_udp udp_mask = {
         .hdr = {
             .dst_port = (uint16_t)-1,
@@ -572,8 +566,9 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
 
     /* UDP */
     {
-        /* do nothing */
-        /* set 4789 */
+        struct rte_flow_item_udp *spec;
+        spec = CONST_CAST(typeof(spec), pattern[UDP].spec);
+        spec->hdr.dst_port = info->tp_dst_port;
     }
 
     /* vxlan */
