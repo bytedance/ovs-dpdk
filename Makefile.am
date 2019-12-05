@@ -92,12 +92,7 @@ EXTRA_DIST = \
 	$(MAN_ROOTS) \
 	Vagrantfile \
 	Vagrantfile-FreeBSD \
-	.mailmap \
-	setup/setup.sh \
-	setup/clear_kernel_if.sh \
-	setup/vs-add.sh \
-	setup/vs-del.sh \
-	lib/netdev-offload-tc.c
+	.mailmap
 
 bin_PROGRAMS =
 sbin_PROGRAMS =
@@ -208,6 +203,8 @@ dist-hook-git: distfiles
 	    LC_ALL=C sort -u > all-distfiles; \
 	  (cd $(srcdir) && git ls-files) | grep -v '\.gitignore$$' | \
 	    grep -v '\.gitattributes$$' | \
+		grep -v -E '^scripts' | \
+		grep -v 'lib/netdev-offload-tc.c' | \
 	    LC_ALL=C sort -u > all-gitfiles; \
 	  LC_ALL=C comm -1 -3 all-distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then \
@@ -503,3 +500,4 @@ include datapath-windows/include/automake.mk
 include windows/automake.mk
 include selinux/automake.mk
 include build-aux/automake.mk
+include scripts/automake.mk
