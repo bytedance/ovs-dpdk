@@ -558,14 +558,6 @@ dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
                     status == OFFLOAD_FULL;
 }
 
-static inline bool
-dp_netdev_flow_offload_failed(const struct dp_netdev_flow *flow)
-{
-    enum offload_status status;
-    atomic_read_explicit(&flow->status, &status, memory_order_acquire);
-    return status == OFFLOAD_FAILED;
-}
-
 static void
 dp_netdev_get_mega_ufid(const struct match *match, ovs_u128 *mega_ufid);
 
@@ -3769,8 +3761,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     cmap_insert(&pmd->flow_table, CONST_CAST(struct cmap_node *, &flow->node),
                 dp_netdev_flow_hash(&flow->ufid));
 
-    if (!dp_netdev_flow_offload_failed(flow))
-        queue_netdev_flow_put(pmd->dp, flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+    queue_netdev_flow_put(pmd->dp, flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
 
     if (OVS_UNLIKELY(!VLOG_DROP_DBG((&upcall_rl)))) {
         struct ds ds = DS_EMPTY_INITIALIZER;
@@ -3859,8 +3850,7 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
-            if (dp_netdev_flow_offload(netdev_flow))
-                queue_netdev_flow_put(pmd->dp, netdev_flow, old_actions, \
+            queue_netdev_flow_put(pmd->dp, netdev_flow, old_actions, \
                                         DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
 
             if (stats) {
