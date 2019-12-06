@@ -293,6 +293,7 @@ struct dp_flow_offload {
     pthread_cond_t cond;
     pthread_t thread;
     bool exit;
+    bool process;
 };
 
 /* Datapath based on the network device interface from netdev.h.
@@ -1522,6 +1523,18 @@ choose_port(struct dp_netdev *dp, const char *name)
 static void *
 dp_netdev_flow_offload_main(void *data);
 
+static void
+dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload)
+{
+    ovs_mutex_init(&dp_flow_offload->mutex);
+    ovs_list_init(&dp_flow_offload->list);
+    xpthread_cond_init(&dp_flow_offload->cond, NULL);
+    dp_flow_offload->exit =  false;
+    dp_flow_offload->thread = \
+        ovs_thread_create("hw_offload",
+                          dp_netdev_flow_offload_main, dp_flow_offload);
+}
+
 static int
 create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
@@ -1579,6 +1592,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     ovs_mutex_init_recursive(&dp->non_pmd_mutex);
     ovsthread_key_create(&dp->per_pmd_key, NULL);
 
+    dp_netdev_offload_init(&dp->dp_flow_offload);
     ovs_mutex_lock(&dp->port_mutex);
     /* non-PMD will be created before all other threads and will
      * allocate static_tx_qid = 0. */
@@ -1595,13 +1609,6 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
 
     dp->last_tnl_conf_seq = seq_read(tnl_conf_seq);
 
-    ovs_mutex_init(&dp->dp_flow_offload.mutex);
-    ovs_list_init(&dp->dp_flow_offload.list);
-    xpthread_cond_init(&dp->dp_flow_offload.cond, NULL);
-    dp->dp_flow_offload.exit =  false;
-    dp->dp_flow_offload.thread = \
-        ovs_thread_create("hw_offload",
-                          dp_netdev_flow_offload_main, &dp->dp_flow_offload);
     *dpp = dp;
     return 0;
 }
@@ -1663,6 +1670,31 @@ dp_delete_meter(struct dp_netdev *dp, uint32_t meter_id)
         free(dp->meters[meter_id]);
         dp->meters[meter_id] = NULL;
     }
+}
+
+static void
+dp_netdev_wait_offload_done(struct dp_flow_offload *offload)
+{
+    bool process;
+    bool target;
+
+    do {
+        atomic_read_explicit(&offload->process, &process, memory_order_acquire);
+        if (process == false) {
+            /* not processing, check if no flows */
+            ovs_mutex_lock(&offload->mutex);
+            if (!ovs_list_is_empty(&offload->list)) {
+                xpthread_cond_signal(&offload->cond);
+                target = true;
+            } else {
+                target = false;
+            }
+            ovs_mutex_unlock(&offload->mutex);
+        } else {
+            /* processing */
+            target = false;
+        }
+    } while (process != target);
 }
 
 static void
@@ -1844,8 +1876,15 @@ tnl_offload_aux_new(void)
 }
 
 static void
+ingress_flow_flush(struct tnl_offload_aux *aux);
+static void
+tnlflow_flush(struct tnl_offload_aux *aux);
+
+static void
 tnl_offload_aux_free(void *offload_aux) {
     struct tnl_offload_aux *aux = offload_aux;
+    ingress_flow_flush(aux);
+    tnlflow_flush(aux);
     hmap_destroy(&aux->ingress_flows);
     hmap_destroy(&aux->tnl_pop_flows);
     ovs_rwlock_destroy(&aux->rwlock);
@@ -2294,19 +2333,19 @@ ingress_flow_find(struct dp_netdev_flow *flow,\
 static void
 ingress_flow_free(struct ingress_flow *inflow)
 {
+    dp_netdev_flow_unref(inflow->flow);
+    netdev_close(inflow->ingress_netdev);
     free(inflow);
 }
 
 static void
 ingress_flow_del(struct ingress_flow *inflow,\
-                 struct tnl_offload_aux *aux, \
-                 struct netdev *vport)
+                 struct tnl_offload_aux *aux)
 {
     ovs_rwlock_wrlock(&aux->rwlock);
     hmap_remove(&aux->ingress_flows, &inflow->node);
     ovs_rwlock_unlock(&aux->rwlock);
 
-    netdev_close(vport);
     ingress_flow_free(inflow);
 }
 
@@ -2319,18 +2358,30 @@ ingress_flow_new(struct dp_netdev_flow *flow, \
     inflow = xzalloc(sizeof(struct ingress_flow));
     inflow->ingress_netdev = inport;
     inflow->flow = flow;
+
+    netdev_ref(inflow->ingress_netdev);
+    dp_netdev_flow_ref(flow);
     return inflow;
 }
 
 static void
 ingress_flow_insert(struct tnl_offload_aux *aux,
-                    struct ingress_flow *inflow,
-                    struct netdev *vport)
+                    struct ingress_flow *inflow)
 {
-    netdev_ref(vport);
     ovs_rwlock_wrlock(&aux->rwlock);
     hmap_insert(&aux->ingress_flows, &inflow->node, \
                 dp_netdev_flow_hash(&inflow->flow->mega_ufid)); 
+    ovs_rwlock_unlock(&aux->rwlock);
+}
+
+static void
+ingress_flow_flush(struct tnl_offload_aux *aux)
+{
+    struct ingress_flow *inflow;
+    ovs_rwlock_wrlock(&aux->rwlock);
+    HMAP_FOR_EACH_POP(inflow, node, &aux->ingress_flows) {
+        ingress_flow_free(inflow);
+    }
     ovs_rwlock_unlock(&aux->rwlock);
 }
 
@@ -2406,6 +2457,7 @@ tnl_pop_flow_op_stat(struct ingress_flow *inflow, \
 static void
 tnlflow_free(struct tnl_pop_flow *tnlflow)
 {
+    dp_netdev_flow_unref(tnlflow->flow);
     free(tnlflow);
 }
 
@@ -2418,6 +2470,17 @@ tnlflow_del(struct tnl_pop_flow *tnlflow, \
     ovs_rwlock_unlock(&aux->rwlock);
 
     tnlflow_free(tnlflow);
+}
+
+static void
+tnlflow_flush(struct tnl_offload_aux *aux)
+{
+    struct tnl_pop_flow *tnlflow;
+    ovs_rwlock_wrlock(&aux->rwlock);
+    HMAP_FOR_EACH_POP(tnlflow, node, &aux->tnl_pop_flows) {
+        tnlflow_free(tnlflow);
+    }
+    ovs_rwlock_unlock(&aux->rwlock);
 }
 
 static void
@@ -2522,6 +2585,7 @@ tnlflow_new(struct dp_netdev_flow *flow)
     struct tnl_pop_flow *tnlflow;
     tnlflow = xzalloc(sizeof(struct tnl_pop_flow));
     tnlflow->flow = flow;
+    dp_netdev_flow_ref(flow);
     return tnlflow;
 }
 
@@ -2574,7 +2638,7 @@ try_del_ingress(struct dp_netdev_flow *flow,\
         ingress_flow_op_flush(inflow, aux);
         atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
                         memory_order_release);
-        ingress_flow_del(inflow, aux, tnl_dev);
+        ingress_flow_del(inflow, aux);
         netdev_close(tnl_dev);
         return 0;
     }
@@ -2641,6 +2705,10 @@ dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 
     netdev = netdev_ports_get(in_port, dp->class);
     if (!netdev) {
+        /* netdev missed, must be deleted*/
+        atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
+            memory_order_release);
+        dp_netdev_flow_unref(flow);
         return -1;
     }
 
@@ -2661,9 +2729,7 @@ exit:
     if (ret) {
         return -1;
     } else {
-        /* unref deleted in_port */
-        netdev_close(netdev);
-        dp_netdev_flow_unref(flow); 
+        dp_netdev_flow_unref(flow);
     }
     return 0;
 }
@@ -2771,7 +2837,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     enum offload_status status;
     status = try_offload_tnl_pop(inflow, aux, info);
     if (status == OFFLOAD_FULL) {
-        ingress_flow_insert(aux, inflow, tnl_dev);
+        ingress_flow_insert(aux, inflow);
     } else {
         ingress_flow_free(inflow);
     }
@@ -2937,9 +3003,6 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
 
 exit:
     if (status == OFFLOAD_FULL) {
-        /* for ingress flows, ref both vport and ingress_dev */
-        /* for tnl flows, ref vport */
-        netdev_ref(netdev);
         dp_netdev_flow_ref(flow);
     }
     netdev_close(netdev);
@@ -2973,13 +3036,15 @@ dp_netdev_flow_offload_main(void *data)
     int ret;
     bool exit = false;
 
-    for (;!exit;) {
+    for (;;) {
         ovs_mutex_lock(&dp_flow_offload->mutex);
         if (ovs_list_is_empty(&dp_flow_offload->list)) {
 again:
+            dp_flow_offload->process = false;
             ovsrcu_quiesce_start();
             ovs_mutex_cond_wait(&dp_flow_offload->cond,
                                 &dp_flow_offload->mutex);
+            dp_flow_offload->process = true;
             ovsrcu_quiesce_end();
         }
 
@@ -5322,6 +5387,7 @@ flush_offload_flows(struct dp_netdev_pmd_thread *pmd)
             queue_netdev_flow_del(dp, flow);
         }
     }
+    dp_netdev_wait_offload_done(&pmd->dp->dp_flow_offload);
 }
 
 static void
@@ -5331,7 +5397,6 @@ reload_affected_pmds(struct dp_netdev *dp)
 
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
         if (pmd->need_reload) {
-            flush_offload_flows(pmd);
             dp_netdev_reload_pmd__(pmd);
         }
     }
@@ -5347,6 +5412,7 @@ reload_affected_pmds(struct dp_netdev *dp)
                 } while (reload);
             }
             pmd->need_reload = false;
+            flush_offload_flows(pmd);
         }
     }
 }

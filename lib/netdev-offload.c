@@ -307,6 +307,8 @@ netdev_uninit_flow_api(struct netdev *netdev)
     if (!flow_api) {
         return;
     }
+    if (cmap_count(&netdev->hw_info.hw_flows))
+        netdev_flow_flush(netdev);
 
     ovsrcu_set(&netdev->flow_api, NULL);
     rfa = netdev_lookup_flow_api(flow_api->type);
