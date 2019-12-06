@@ -287,6 +287,14 @@ struct pmd_auto_lb {
     uint64_t rebalance_poll_timer;
 };
 
+struct dp_flow_offload {
+    struct ovs_mutex mutex;
+    struct ovs_list list;
+    pthread_cond_t cond;
+    pthread_t thread;
+    bool exit;
+};
+
 /* Datapath based on the network device interface from netdev.h.
  *
  *
@@ -368,6 +376,7 @@ struct dp_netdev {
 
     struct conntrack *conntrack;
     struct pmd_auto_lb pmd_alb;
+    struct dp_flow_offload dp_flow_offload;
 };
 
 static void meter_lock(const struct dp_netdev *dp, uint32_t meter_id)
@@ -405,19 +414,6 @@ struct dp_flow_offload_item {
     struct ovs_list node;
 };
 
-struct dp_flow_offload {
-    struct ovs_mutex mutex;
-    struct ovs_list list;
-    pthread_cond_t cond;
-};
-
-static struct dp_flow_offload dp_flow_offload = {
-    .mutex = OVS_MUTEX_INITIALIZER,
-    .list  = OVS_LIST_INITIALIZER(&dp_flow_offload.list),
-};
-
-static struct ovsthread_once offload_thread_once
-    = OVSTHREAD_ONCE_INITIALIZER;
 
 #define XPS_TIMEOUT 500000LL    /* In microseconds. */
 
@@ -1523,6 +1519,9 @@ choose_port(struct dp_netdev *dp, const char *name)
     return ODPP_NONE;
 }
 
+static void *
+dp_netdev_flow_offload_main(void *data);
+
 static int
 create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
@@ -1595,6 +1594,14 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     }
 
     dp->last_tnl_conf_seq = seq_read(tnl_conf_seq);
+
+    ovs_mutex_init(&dp->dp_flow_offload.mutex);
+    ovs_list_init(&dp->dp_flow_offload.list);
+    xpthread_cond_init(&dp->dp_flow_offload.cond, NULL);
+    dp->dp_flow_offload.exit =  false;
+    dp->dp_flow_offload.thread = \
+        ovs_thread_create("hw_offload",
+                          dp_netdev_flow_offload_main, &dp->dp_flow_offload);
     *dpp = dp;
     return 0;
 }
@@ -1658,6 +1665,16 @@ dp_delete_meter(struct dp_netdev *dp, uint32_t meter_id)
     }
 }
 
+static void
+dp_netdev_join_offload_thread(struct dp_flow_offload *offload)
+{
+    ovs_mutex_lock(&offload->mutex);
+    atomic_store_explicit(&offload->exit, true, memory_order_release);
+    xpthread_cond_signal(&offload->cond);
+    ovs_mutex_unlock(&offload->mutex);
+    xpthread_join(offload->thread, NULL);
+}
+
 /* Requires dp_netdev_mutex so that we can't get a new reference to 'dp'
  * through the 'dp_netdevs' shash while freeing 'dp'. */
 static void
@@ -1675,6 +1692,7 @@ dp_netdev_free(struct dp_netdev *dp)
     ovs_mutex_unlock(&dp->port_mutex);
 
     dp_netdev_destroy_all_pmds(dp, true);
+    dp_netdev_join_offload_thread(&dp->dp_flow_offload);
     cmap_destroy(&dp->poll_threads);
 
     ovs_mutex_destroy(&dp->tx_qid_pool_mutex);
@@ -2204,7 +2222,6 @@ dp_netdev_alloc_flow_offload(struct dp_netdev *dp,
                             old_act->actions, \
                                 old_act->size);
     dp_netdev_flow_ref(flow);
-    ovs_refcount_ref(&dp->ref_cnt);
 
     return offload;
 }
@@ -2212,7 +2229,6 @@ dp_netdev_alloc_flow_offload(struct dp_netdev *dp,
 static void
 dp_netdev_free_flow_offload(struct dp_flow_offload_item *offload)
 {
-    dp_netdev_unref(offload->dp);
     dp_netdev_flow_unref(offload->flow);
 
     dp_netdev_actions_free(offload->old_dp_act);
@@ -2220,12 +2236,13 @@ dp_netdev_free_flow_offload(struct dp_flow_offload_item *offload)
 }
 
 static void
-dp_netdev_append_flow_offload(struct dp_flow_offload_item *offload)
+dp_netdev_append_flow_offload(struct dp_flow_offload *dp_flow_offload,
+                                struct dp_flow_offload_item *offload)
 {
-    ovs_mutex_lock(&dp_flow_offload.mutex);
-    ovs_list_push_back(&dp_flow_offload.list, &offload->node);
-    xpthread_cond_signal(&dp_flow_offload.cond);
-    ovs_mutex_unlock(&dp_flow_offload.mutex);
+    ovs_mutex_lock(&dp_flow_offload->mutex);
+    ovs_list_push_back(&dp_flow_offload->list, &offload->node);
+    xpthread_cond_signal(&dp_flow_offload->cond);
+    ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
 
 static void
@@ -2947,24 +2964,37 @@ dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
 }
 
 static void *
-dp_netdev_flow_offload_main(void *data OVS_UNUSED)
+dp_netdev_flow_offload_main(void *data)
 {
     struct dp_flow_offload_item *offload;
+    struct dp_flow_offload *dp_flow_offload = (struct dp_flow_offload*)data;
     struct ovs_list *list;
     const char *op;
     int ret;
+    bool exit = false;
 
-    for (;;) {
-        ovs_mutex_lock(&dp_flow_offload.mutex);
-        if (ovs_list_is_empty(&dp_flow_offload.list)) {
+    for (;!exit;) {
+        ovs_mutex_lock(&dp_flow_offload->mutex);
+        if (ovs_list_is_empty(&dp_flow_offload->list)) {
+again:
             ovsrcu_quiesce_start();
-            ovs_mutex_cond_wait(&dp_flow_offload.cond,
-                                &dp_flow_offload.mutex);
+            ovs_mutex_cond_wait(&dp_flow_offload->cond,
+                                &dp_flow_offload->mutex);
             ovsrcu_quiesce_end();
         }
-        list = ovs_list_pop_front(&dp_flow_offload.list);
-        offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
-        ovs_mutex_unlock(&dp_flow_offload.mutex);
+
+        atomic_read_explicit(&dp_flow_offload->exit, &exit, memory_order_acquire);
+        if (!ovs_list_is_empty(&dp_flow_offload->list)) {
+            list = ovs_list_pop_front(&dp_flow_offload->list);
+            offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
+        } else if (exit) {
+            ovs_mutex_unlock(&dp_flow_offload->mutex);
+            break;
+        } else {
+            goto again;
+        }
+
+        ovs_mutex_unlock(&dp_flow_offload->mutex);
 
         /*  get actions here, act will not be freed as 
          *  this is not in a grace period.
@@ -2993,6 +3023,15 @@ dp_netdev_flow_offload_main(void *data OVS_UNUSED)
         dp_netdev_free_flow_offload(offload);
     }
 
+    ovs_mutex_lock(&dp_flow_offload->mutex);
+    for (;!ovs_list_is_empty(&dp_flow_offload->list);) {
+        list = ovs_list_pop_front(&dp_flow_offload->list);
+        offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
+        dp_netdev_free_flow_offload(offload);
+    }
+    ovs_mutex_unlock(&dp_flow_offload->mutex);
+    VLOG_INFO("hw_offload exit\n");
+
     return NULL;
 }
 
@@ -3002,16 +3041,9 @@ queue_netdev_flow_del(struct dp_netdev *dp,
 {
     struct dp_flow_offload_item *offload;
 
-    if (ovsthread_once_start(&offload_thread_once)) {
-        xpthread_cond_init(&dp_flow_offload.cond, NULL);
-        ovs_thread_create("hw_offload",
-                          dp_netdev_flow_offload_main, NULL);
-        ovsthread_once_done(&offload_thread_once);
-    }
-
     offload = dp_netdev_alloc_flow_offload(dp, flow, NULL, 
                                            DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
-    dp_netdev_append_flow_offload(offload);
+    dp_netdev_append_flow_offload(&dp->dp_flow_offload, offload);
 }
 
 static void
@@ -3026,15 +3058,8 @@ queue_netdev_flow_put(struct dp_netdev *dp,\
         return;
     }
 
-    if (ovsthread_once_start(&offload_thread_once)) {
-        xpthread_cond_init(&dp_flow_offload.cond, NULL);
-        ovs_thread_create("hw_offload",
-                          dp_netdev_flow_offload_main, NULL);
-        ovsthread_once_done(&offload_thread_once);
-    }
-
     offload = dp_netdev_alloc_flow_offload(dp, flow, old_act, op);
-    dp_netdev_append_flow_offload(offload);
+    dp_netdev_append_flow_offload(&dp->dp_flow_offload, offload);
 }
 
 static void
