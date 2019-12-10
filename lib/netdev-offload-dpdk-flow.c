@@ -463,6 +463,139 @@ netdev_dpdk_flow_actions_add_mark_rss(struct flow_actions *actions,
 }
 
 static int
+add_l3_pattern(struct rte_flow_item pattern[],
+                const struct match *match,
+                int IPV4, int TCP, int UDP, int ICMP, int SCTP)
+{
+    uint8_t proto = 0;
+    /* IP v4 */
+    if (match->flow.dl_type == htons(ETH_TYPE_IP)) {
+        struct rte_flow_item_ipv4 *spec, *mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[IPV4].spec);
+        mask = CONST_CAST(typeof(mask), pattern[IPV4].mask);
+
+        spec->hdr.type_of_service = match->flow.nw_tos;
+        spec->hdr.time_to_live    = match->flow.nw_ttl;
+        spec->hdr.next_proto_id   = match->flow.nw_proto;
+        spec->hdr.src_addr        = match->flow.nw_src;
+        spec->hdr.dst_addr        = match->flow.nw_dst;
+
+        mask->hdr.type_of_service = match->wc.masks.nw_tos;
+        mask->hdr.time_to_live    = match->wc.masks.nw_ttl;
+        mask->hdr.next_proto_id   = match->wc.masks.nw_proto;
+        mask->hdr.src_addr        = match->wc.masks.nw_src;
+        mask->hdr.dst_addr        = match->wc.masks.nw_dst;
+
+        /* Save proto for L4 protocol setup. */
+        proto = spec->hdr.next_proto_id & mask->hdr.next_proto_id;
+        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_IPV4;
+    } else {
+        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+    }
+
+    if (!match->wc.masks.nw_proto) {
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        return 0;
+    }
+
+    if (proto != IPPROTO_ICMP && proto != IPPROTO_UDP  &&
+        proto != IPPROTO_SCTP && proto != IPPROTO_TCP  &&
+        (match->wc.masks.tp_src ||
+         match->wc.masks.tp_dst ||
+         match->wc.masks.tcp_flags)) {
+        VLOG_ERR("L4 Protocol (%u) not supported\n", proto);
+        return -1;
+    }
+
+    if ((match->wc.masks.tp_src && match->wc.masks.tp_src != OVS_BE16_MAX) ||
+        (match->wc.masks.tp_dst && match->wc.masks.tp_dst != OVS_BE16_MAX)) {
+        VLOG_ERR("L4 port only support exact match\n");
+        return -1;
+    }
+
+    if (proto == IPPROTO_TCP) {
+        struct rte_flow_item_tcp *spec, *mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[TCP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[TCP].mask);
+
+        spec->hdr.src_port  = match->flow.tp_src;
+        spec->hdr.dst_port  = match->flow.tp_dst;
+        spec->hdr.data_off  = ntohs(match->flow.tcp_flags) >> 8;
+        spec->hdr.tcp_flags = ntohs(match->flow.tcp_flags) & 0xff;
+
+        mask->hdr.src_port  = match->wc.masks.tp_src;
+        mask->hdr.dst_port  = match->wc.masks.tp_dst;
+        mask->hdr.data_off  = ntohs(match->wc.masks.tcp_flags) >> 8;
+        mask->hdr.tcp_flags = ntohs(match->wc.masks.tcp_flags) & 0xff;
+
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_TCP;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+
+    } else if (proto == IPPROTO_UDP) {
+        struct rte_flow_item_udp *spec, *mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[UDP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[UDP].mask);
+
+        spec->hdr.src_port = match->flow.tp_src;
+        spec->hdr.dst_port = match->flow.tp_dst;
+
+        mask->hdr.src_port = match->wc.masks.tp_src;
+        mask->hdr.dst_port = match->wc.masks.tp_dst;
+
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_UDP;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+
+    } else if (proto == IPPROTO_SCTP) {
+        struct rte_flow_item_sctp *spec, *mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[SCTP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[SCTP].mask);
+
+        spec->hdr.src_port = match->flow.tp_src;
+        spec->hdr.dst_port = match->flow.tp_dst;
+
+        mask->hdr.src_port = match->wc.masks.tp_src;
+        mask->hdr.dst_port = match->wc.masks.tp_dst;
+
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_SCTP;
+    } else if (proto == IPPROTO_ICMP) {
+        struct rte_flow_item_icmp *spec, *mask;
+
+        spec = CONST_CAST(typeof(spec), pattern[ICMP].spec);
+        mask = CONST_CAST(typeof(mask), pattern[ICMP].mask);
+
+        spec->hdr.icmp_type = (uint8_t) ntohs(match->flow.tp_src);
+        spec->hdr.icmp_code = (uint8_t) ntohs(match->flow.tp_dst);
+
+        mask->hdr.icmp_type = (uint8_t) ntohs(match->wc.masks.tp_src);
+        mask->hdr.icmp_code = (uint8_t) ntohs(match->wc.masks.tp_dst);
+
+        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
+        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_ICMP;
+        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
+    }
+    return 0;
+}
+
+static int
 netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
                                 const struct match *match,
                                 const struct offload_info *info)
@@ -504,7 +637,22 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
         },
     };
 
-    enum {ETH, IPV4, UDP, VXLAN, IETH, IEND};
+    static struct rte_flow_item_ipv4 iip_spec;
+    static struct rte_flow_item_ipv4 iip_mask;
+
+    static struct rte_flow_item_tcp itcp_spec;
+    static struct rte_flow_item_tcp itcp_mask;
+
+    static struct rte_flow_item_udp iudp_spec;
+    static struct rte_flow_item_udp iudp_mask;
+
+    static struct rte_flow_item_icmp iicmp_spec;
+    static struct rte_flow_item_icmp iicmp_mask;
+
+    static struct rte_flow_item_sctp isctp_spec;
+    static struct rte_flow_item_sctp isctp_mask;
+    
+    enum {ETH, IPV4, UDP, VXLAN, IETH, IIP, ITCP, IUDP, IICMP, ISCTP, IEND};
     static struct rte_flow_item pattern[] = {
         [ETH] = {
             .type = RTE_FLOW_ITEM_TYPE_ETH,
@@ -534,6 +682,36 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
             .type = RTE_FLOW_ITEM_TYPE_ETH,
             .spec = &ieth_spec,
             .mask = &ieth_mask,
+            .last = NULL,
+        },
+        [IIP] = {
+            .type = RTE_FLOW_ITEM_TYPE_IPV4,
+            .spec = &iip_spec,
+            .mask = &iip_mask,
+            .last = NULL,
+        },
+        [ITCP] = {
+            .type = RTE_FLOW_ITEM_TYPE_TCP,
+            .spec = &itcp_spec,
+            .mask = &itcp_mask,
+            .last = NULL,
+        },
+        [IUDP] = {
+            .type = RTE_FLOW_ITEM_TYPE_UDP,
+            .spec = &iudp_spec,
+            .mask = &iudp_mask,
+            .last = NULL,
+        },
+        [IICMP] = {
+            .type = RTE_FLOW_ITEM_TYPE_ICMP,
+            .spec = &iicmp_spec,
+            .mask = &iicmp_mask,
+            .last = NULL,
+        },
+        [ISCTP] = {
+            .type = RTE_FLOW_ITEM_TYPE_SCTP,
+            .spec = &isctp_spec,
+            .mask = &isctp_mask,
             .last = NULL,
         },
         [IEND] = {
@@ -586,10 +764,24 @@ netdev_dpdk_vxlan_patterns_add(struct rte_flow_item **patterns,
     /* inner eth */
     {
         struct rte_flow_item_eth *spec;
+        struct rte_flow_item_eth *mask;
         spec = CONST_CAST(typeof(spec), pattern[IETH].spec);
+        mask = CONST_CAST(typeof(mask), pattern[IETH].mask);
 
         memcpy(&spec->dst, &match->flow.dl_dst, sizeof(spec->dst));
+        memcpy(&spec->src, &match->flow.dl_src, sizeof spec->src);
+        spec->type = match->flow.dl_type;
+
+        memcpy(&mask->dst, &match->wc.masks.dl_dst, sizeof mask->dst);
+        memcpy(&mask->src, &match->wc.masks.dl_src, sizeof mask->src);
+        mask->type = match->wc.masks.dl_type;
+
     }
+
+    int ret;
+    ret = add_l3_pattern(pattern, match, IIP, ITCP, IUDP, IICMP, ISCTP);
+    if(ret)
+        return ret;
 
     *patterns = pattern;
     return 0;
@@ -681,7 +873,6 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
         },
     };
 
-    uint8_t proto = 0;
     /* Eth */
     if (!eth_addr_is_zero(match->wc.masks.dl_src) ||
         !eth_addr_is_zero(match->wc.masks.dl_dst)) {
@@ -728,130 +919,10 @@ netdev_dpdk_normal_patterns_add(struct rte_flow_item **patterns,
     } else {
         pattern[VLAN].type = RTE_FLOW_ITEM_TYPE_VOID;
     }
-
-    /* IP v4 */
-    if (match->flow.dl_type == htons(ETH_TYPE_IP)) {
-        struct rte_flow_item_ipv4 *spec, *mask;
-
-        spec = CONST_CAST(typeof(spec), pattern[IPV4].spec);
-        mask = CONST_CAST(typeof(mask), pattern[IPV4].mask);
-
-        spec->hdr.type_of_service = match->flow.nw_tos;
-        spec->hdr.time_to_live    = match->flow.nw_ttl;
-        spec->hdr.next_proto_id   = match->flow.nw_proto;
-        spec->hdr.src_addr        = match->flow.nw_src;
-        spec->hdr.dst_addr        = match->flow.nw_dst;
-
-        mask->hdr.type_of_service = match->wc.masks.nw_tos;
-        mask->hdr.time_to_live    = match->wc.masks.nw_ttl;
-        mask->hdr.next_proto_id   = match->wc.masks.nw_proto;
-        mask->hdr.src_addr        = match->wc.masks.nw_src;
-        mask->hdr.dst_addr        = match->wc.masks.nw_dst;
-
-        /* Save proto for L4 protocol setup. */
-        proto = spec->hdr.next_proto_id & mask->hdr.next_proto_id;
-        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_IPV4;
-    } else {
-        pattern[IPV4].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
-    }
-
-    if (proto != IPPROTO_ICMP && proto != IPPROTO_UDP  &&
-        proto != IPPROTO_SCTP && proto != IPPROTO_TCP  &&
-        (match->wc.masks.tp_src ||
-         match->wc.masks.tp_dst ||
-         match->wc.masks.tcp_flags)) {
-        VLOG_ERR("L4 Protocol (%u) not supported\n", proto);
-        return -1;
-    }
-
-    if ((match->wc.masks.tp_src && match->wc.masks.tp_src != OVS_BE16_MAX) ||
-        (match->wc.masks.tp_dst && match->wc.masks.tp_dst != OVS_BE16_MAX)) {
-        VLOG_ERR("L4 port only support exact match\n");
-        return -1;
-    }
-
-    if (proto == IPPROTO_TCP) {
-        struct rte_flow_item_tcp *spec, *mask;
-
-        spec = CONST_CAST(typeof(spec), pattern[TCP].spec);
-        mask = CONST_CAST(typeof(mask), pattern[TCP].mask);
-
-        spec->hdr.src_port  = match->flow.tp_src;
-        spec->hdr.dst_port  = match->flow.tp_dst;
-        spec->hdr.data_off  = ntohs(match->flow.tcp_flags) >> 8;
-        spec->hdr.tcp_flags = ntohs(match->flow.tcp_flags) & 0xff;
-
-        mask->hdr.src_port  = match->wc.masks.tp_src;
-        mask->hdr.dst_port  = match->wc.masks.tp_dst;
-        mask->hdr.data_off  = ntohs(match->wc.masks.tcp_flags) >> 8;
-        mask->hdr.tcp_flags = ntohs(match->wc.masks.tcp_flags) & 0xff;
-
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_TCP;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
-
-    } else if (proto == IPPROTO_UDP) {
-        struct rte_flow_item_udp *spec, *mask;
-
-        spec = CONST_CAST(typeof(spec), pattern[UDP].spec);
-        mask = CONST_CAST(typeof(mask), pattern[UDP].mask);
-
-        spec->hdr.src_port = match->flow.tp_src;
-        spec->hdr.dst_port = match->flow.tp_dst;
-
-        mask->hdr.src_port = match->wc.masks.tp_src;
-        mask->hdr.dst_port = match->wc.masks.tp_dst;
-
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_UDP;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
-
-    } else if (proto == IPPROTO_SCTP) {
-        struct rte_flow_item_sctp *spec, *mask;
-
-        spec = CONST_CAST(typeof(spec), pattern[SCTP].spec);
-        mask = CONST_CAST(typeof(mask), pattern[SCTP].mask);
-
-        spec->hdr.src_port = match->flow.tp_src;
-        spec->hdr.dst_port = match->flow.tp_dst;
-
-        mask->hdr.src_port = match->wc.masks.tp_src;
-        mask->hdr.dst_port = match->wc.masks.tp_dst;
-
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_SCTP;
-    } else if (proto == IPPROTO_ICMP) {
-        struct rte_flow_item_icmp *spec, *mask;
-
-        spec = CONST_CAST(typeof(spec), pattern[ICMP].spec);
-        mask = CONST_CAST(typeof(mask), pattern[ICMP].mask);
-
-        spec->hdr.icmp_type = (uint8_t) ntohs(match->flow.tp_src);
-        spec->hdr.icmp_code = (uint8_t) ntohs(match->flow.tp_dst);
-
-        mask->hdr.icmp_type = (uint8_t) ntohs(match->wc.masks.tp_src);
-        mask->hdr.icmp_code = (uint8_t) ntohs(match->wc.masks.tp_dst);
-
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_ICMP;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
-    } else {
-        pattern[TCP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[UDP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[ICMP].type = RTE_FLOW_ITEM_TYPE_VOID;
-        pattern[SCTP].type = RTE_FLOW_ITEM_TYPE_VOID;
-    }
-    
-
+    int ret;
+    ret = add_l3_pattern(pattern, match, IPV4, TCP, UDP, ICMP, SCTP);
+    if (ret)
+        return ret;
     *patterns = pattern;
     return 0;
 }

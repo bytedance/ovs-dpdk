@@ -2278,7 +2278,9 @@ dp_netdev_append_flow_offload(struct dp_flow_offload *dp_flow_offload,
 {
     ovs_mutex_lock(&dp_flow_offload->mutex);
     ovs_list_push_back(&dp_flow_offload->list, &offload->node);
-    xpthread_cond_signal(&dp_flow_offload->cond);
+    if (!dp_flow_offload->process) {
+        xpthread_cond_signal(&dp_flow_offload->cond);
+    }
     ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
 
@@ -3118,6 +3120,10 @@ queue_netdev_flow_put(struct dp_netdev *dp,\
     struct dp_flow_offload_item *offload;
 
     if (!netdev_is_flow_api_enabled()) {
+        return;
+    }
+
+    if (dp->dp_flow_offload.exit) {
         return;
     }
 
