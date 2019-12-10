@@ -17,6 +17,7 @@
 #include <config.h>
 
 #include <rte_flow.h>
+#include <unistd.h>
 
 #include "cmap.h"
 #include "dpif-netdev.h"
@@ -280,14 +281,25 @@ netdev_offload_dpdk_destroy_flow(struct netdev *netdev,
                                  struct ufid_to_rte_flow_data *fd)
 {
     ufid_to_flow_data_remove(netdev, fd);
+    int retry = 10;
+    int ret;
 
-    do {
+    while(!__sync_bool_compare_and_swap(&fd->refcnt.count, 1, 0) && (retry --) > 0) {
         /* do nothig */
         /* ovs_pause */
-    } while(!__sync_bool_compare_and_swap(&fd->refcnt.count, 1, 0));
+        usleep(10);
+    }
+
+    if (retry == 0 && ovs_refcount_read(&fd->refcnt) != 0) {
+        ret = -1;
+        ufid_to_flow_data_insert(netdev, fd);
+        VLOG_ERR("%s: rte flow destroy error: fail to wait refcnt to 1\n",
+                 netdev_get_name(netdev));
+        return ret;
+    }
 
     struct rte_flow_error error;
-    int ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
+    ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
 
     if (ret == 0) {
         VLOG_DBG("%s: removed rte flow %p associated with ufid " UUID_FMT "\n",
