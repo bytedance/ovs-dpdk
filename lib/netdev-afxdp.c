@@ -42,6 +42,7 @@
 #include "openvswitch/compiler.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/list.h"
+#include "openvswitch/thread.h"
 #include "openvswitch/vlog.h"
 #include "ovs-numa.h"
 #include "packets.h"
@@ -159,6 +160,13 @@ struct xsk_socket_info {
     uint32_t outstanding_tx; /* Number of descriptors filled in tx and cq. */
     uint32_t available_rx;   /* Number of descriptors filled in rx and fq. */
     atomic_uint64_t tx_dropped;
+};
+
+struct netdev_afxdp_tx_lock {
+    /* Padding to make netdev_afxdp_tx_lock exactly one cache line long. */
+    PADDED_MEMBERS(CACHE_LINE_SIZE,
+        struct ovs_spin lock;
+    );
 };
 
 #ifdef HAVE_XDP_NEED_WAKEUP
@@ -515,10 +523,10 @@ xsk_configure_all(struct netdev *netdev)
     }
 
     n_txq = netdev_n_txq(netdev);
-    dev->tx_locks = xcalloc(n_txq, sizeof *dev->tx_locks);
+    dev->tx_locks = xzalloc_cacheline(n_txq * sizeof *dev->tx_locks);
 
     for (i = 0; i < n_txq; i++) {
-        ovs_spin_init(&dev->tx_locks[i]);
+        ovs_spin_init(&dev->tx_locks[i].lock);
     }
 
     return 0;
@@ -580,9 +588,9 @@ xsk_destroy_all(struct netdev *netdev)
 
     if (dev->tx_locks) {
         for (i = 0; i < netdev_n_txq(netdev); i++) {
-            ovs_spin_destroy(&dev->tx_locks[i]);
+            ovs_spin_destroy(&dev->tx_locks[i].lock);
         }
-        free(dev->tx_locks);
+        free_cacheline(dev->tx_locks);
         dev->tx_locks = NULL;
     }
 }
@@ -1122,9 +1130,9 @@ netdev_afxdp_batch_send(struct netdev *netdev, int qid,
         dev = netdev_linux_cast(netdev);
         qid = qid % netdev_n_txq(netdev);
 
-        ovs_spin_lock(&dev->tx_locks[qid]);
+        ovs_spin_lock(&dev->tx_locks[qid].lock);
         ret = __netdev_afxdp_batch_send(netdev, qid, batch);
-        ovs_spin_unlock(&dev->tx_locks[qid]);
+        ovs_spin_unlock(&dev->tx_locks[qid].lock);
     } else {
         ret = __netdev_afxdp_batch_send(netdev, qid, batch);
     }
