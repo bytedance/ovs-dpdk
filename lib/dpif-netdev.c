@@ -2620,14 +2620,9 @@ try_ingress(struct dp_netdev_actions *act, \
 }
 
 static int 
-try_del_ingress(struct dp_netdev_flow *flow,\
-                struct dp_netdev_actions *act, \
-                struct dp_netdev *dp)
+del_ingress(struct dp_netdev_flow *flow,\
+            struct netdev *tnl_dev)
 {
-    struct netdev *tnl_dev = try_ingress(act, dp);
-    if (!tnl_dev) {
-        return -1;
-    }
     struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
     struct tnl_offload_aux *aux  = vport->offload_aux;
     // get old act and get vport 
@@ -2644,6 +2639,18 @@ try_del_ingress(struct dp_netdev_flow *flow,\
     }
     netdev_close(tnl_dev);
     return -1;
+}
+
+static int
+try_del_ingress(struct dp_netdev_flow *flow, \
+                struct dp_netdev_actions *act, \
+                struct dp_netdev *dp)
+{
+    struct netdev *tnl_dev;
+    tnl_dev = try_ingress(act, dp);
+    if (!tnl_dev)
+        return -1;
+    return del_ingress(flow, tnl_dev);
 }
 
 static bool
@@ -2712,7 +2719,7 @@ dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
         return -1;
     }
 
-    ret = try_del_ingress(flow, offload->dp_act, dp); 
+    ret = try_del_ingress(flow, offload->dp_act, dp);
     if (!ret) {
         goto exit;
     }
@@ -2846,6 +2853,21 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     return status;
 }
 
+static char *get_act_str(struct ds *ds, struct dp_netdev_actions *act)
+{
+    format_odp_actions(ds, act->actions, act->size, NULL);
+    return ds_cstr(ds);
+
+}
+
+static void dp_netdev_show_mod_act(struct dp_netdev_actions *act)
+{
+    struct ds ds;
+    ds_init(&ds);
+    VLOG_INFO("mod actions to:%s\n",  get_act_str(&ds, act));
+    ds_destroy(&ds);
+}
+
 static enum offload_status
 dp_netdev_try_offload_ingress(struct dp_netdev_flow *flow,\
                               struct dp_netdev *dp, \
@@ -2858,7 +2880,14 @@ dp_netdev_try_offload_ingress(struct dp_netdev_flow *flow,\
 
     if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD) {
         struct dp_netdev_actions *act = offload->old_dp_act;
-        try_del_ingress(flow, act, dp);
+        struct netdev *tnl_dev = try_ingress(act, dp);
+        if (!tnl_dev) {
+            return OFFLOAD_NONE;
+        }
+        VLOG_INFO("MOD an ingress flow on port %d\n",
+                flow->flow.in_port.odp_port);
+        dp_netdev_show_mod_act(dp_netdev_flow_get_actions(flow));
+        del_ingress(flow, tnl_dev);
         return OFFLOAD_NONE;
     }
     return OFFLOAD_NONE;
