@@ -87,7 +87,10 @@ if [[ $mode != "switchdev" ]]; then
         fi
     done
     devlink dev eswitch set pci/$pci mode switchdev
+    #wait for udev changes all the eth name
+    sleep 2
 fi
+
 
 numa=`cat /sys/class/net/$ETH/device/numa_node`
 numanodes=`ls -dl /sys/devices/system/node/node* | wc -l`
