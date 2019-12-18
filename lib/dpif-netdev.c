@@ -1990,8 +1990,12 @@ dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev,
     if (netdev_vport_is_vport_class(netdev_get_class(netdev))) {
         if (netdev_get_tunnel_config(netdev)) {
             struct netdev_vport *vport = netdev_vport_cast(netdev);
-            vport->offload_aux = tnl_offload_aux_new();
-            vport->offload_aux_free = tnl_offload_aux_free;
+            if (!vport->offload_aux) {
+                vport->offload_aux = tnl_offload_aux_new();
+                vport->offload_aux_free = tnl_offload_aux_free;
+            } else {
+                VLOG_INFO("vport already has a offload_aux\n");
+            }
         }
     }
     ovs_mutex_unlock(&dp->port_mutex);
@@ -2763,17 +2767,15 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     bool found;
     struct netdev_vport *vport = netdev_vport_cast(inport);
     struct tnl_offload_aux * aux = vport->offload_aux;
-    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD) {
-        tnlflow = tnlflow_find(flow, aux, &found);
-        if (found)
-            return tnlflow->flow->status;
+
+    /* if it's add, find will fail, new one.
+     * if it's mod, find might also fail, this is because
+     * the previous insertion might fail, so find will only fail
+     * let's try to insert anyway.
+     */
+    tnlflow = tnlflow_find(flow, aux, &found);
+    if (!found)
         tnlflow = tnlflow_new(flow);
-    } else {
-        /* modify */
-        tnlflow = tnlflow_find(flow, aux, &found);
-        if (!found)
-            return OFFLOAD_NONE;
-    }
 
     ovs_rwlock_rdlock(&aux->rwlock);
     HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
@@ -2799,10 +2801,12 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     }
     ovs_rwlock_unlock(&aux->rwlock);
 
-    if (!need_rollback) {
-        tnlflow_insert(aux, tnlflow);
-    } else {
-        tnlflow_free(tnlflow);
+    if (!found) {
+        if (!need_rollback) {
+            tnlflow_insert(aux, tnlflow);
+        } else {
+            tnlflow_free(tnlflow);
+        }
     }
 
     return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
@@ -2834,21 +2838,16 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     /* multiple pmd thread has the same flow in
      * pmd thread flow table
      */
+    enum offload_status status;
     if (found) {
+        status = try_offload_tnl_pop(inflow, aux, info);
         netdev_close(tnl_dev);
-        return inflow->flow->status;
+        return status;
     }
 
     inflow = ingress_flow_new(flow, inport);
-
-    enum offload_status status;
+    ingress_flow_insert(aux, inflow);
     status = try_offload_tnl_pop(inflow, aux, info);
-    if (status == OFFLOAD_FULL) {
-        ingress_flow_insert(aux, inflow);
-    } else {
-        ingress_flow_free(inflow);
-    }
-
     netdev_close(tnl_dev);
     return status;
 }
@@ -2857,7 +2856,6 @@ static char *get_act_str(struct ds *ds, struct dp_netdev_actions *act)
 {
     format_odp_actions(ds, act->actions, act->size, NULL);
     return ds_cstr(ds);
-
 }
 
 static void dp_netdev_show_mod_act(struct dp_netdev_actions *act)
@@ -2998,7 +2996,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     const struct dpif_class *dpif_class = dp->class;
     info.dpif_class = dpif_class;
 
-    if (flow->dead || flow->status == OFFLOAD_FAILED) {
+    if (flow->dead) {
         return -1;
     }
 
@@ -3007,7 +3005,13 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
         return -1;
     }
 
-    if (!offload_check_action(offload->dp_act, dp)) {
+    /* if it's mod, the rule might exist in hw, so we can't
+     * check if the action is ok or not, but let it goes
+     * to netdev-offload layer, to let this rule replace
+     * the hw rule, if fails, the original rule will be deleted
+     */
+    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD && \
+            !offload_check_action(offload->dp_act, dp)) {
         netdev_close(netdev);
         return -1;
     }
