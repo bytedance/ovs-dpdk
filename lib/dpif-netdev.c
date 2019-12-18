@@ -466,6 +466,7 @@ enum offload_status {
     OFFLOAD_FAILED,  /* tried but failed, not need to try again */
     OFFLOAD_MASK,    /* mask offloaded */
     OFFLOAD_FULL,    /* full offloaded */ 
+    OFFLOAD_PARTIAL, /* ingress offload */
 };
 
 /* A flow in 'dp_netdev_pmd_thread's 'flow_table'.
@@ -545,13 +546,20 @@ static void dp_netdev_flow_unref(struct dp_netdev_flow *);
 static bool dp_netdev_flow_ref(struct dp_netdev_flow *);
 static int dpif_netdev_flow_from_nlattrs(const struct nlattr *, uint32_t,
                                          struct flow *, bool);
+
+static inline bool
+offload_status_offloaded(enum offload_status status)
+{
+    return status == OFFLOAD_MASK || \
+                status == OFFLOAD_FULL || \
+                status == OFFLOAD_PARTIAL;
+}
 static inline bool
 dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
 {
     enum offload_status status;
     atomic_read_explicit(&flow->status, &status, memory_order_acquire);
-    return status == OFFLOAD_MASK || \
-                    status == OFFLOAD_FULL;
+    return offload_status_offloaded(status);
 }
 
 static void
@@ -2807,9 +2815,14 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
         } else {
             tnlflow_free(tnlflow);
         }
+        return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
     }
 
-    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
+    /* mod */
+    if (need_rollback) {
+        tnlflow_del(tnlflow, aux);
+    }
+    return OFFLOAD_NONE;
 }
 
 static enum offload_status
@@ -2842,14 +2855,18 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     if (found) {
         status = try_offload_tnl_pop(inflow, aux, info);
         netdev_close(tnl_dev);
-        return status;
+        goto exit;
     }
 
     inflow = ingress_flow_new(flow, inport);
     ingress_flow_insert(aux, inflow);
     status = try_offload_tnl_pop(inflow, aux, info);
     netdev_close(tnl_dev);
-    return status;
+exit:
+    if (status == OFFLOAD_FAILED)
+        return OFFLOAD_PARTIAL;
+    else
+        return OFFLOAD_FULL;
 }
 
 static char *get_act_str(struct ds *ds, struct dp_netdev_actions *act)
@@ -3010,7 +3027,10 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     /* if it's mod, the rule might exist in hw, so we can't
      * check if the action is ok or not, but let it goes
      * to netdev-offload layer, to let this rule replace
-     * the hw rule, if fails, the original rule will be deleted
+     * the hw rule, if fails, the original hw rule will be deleted
+     *
+     * @NOTE: if it's mod, always return OFFLOAD_NONE, to make sure
+     * not ref dp_netdev_flow.
      */
     if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD && \
             !offload_check_action(offload->dp_act, dp)) {
@@ -3037,7 +3057,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     atomic_store_explicit(&flow->status, status, memory_order_release);
 
 exit:
-    if (status == OFFLOAD_FULL) {
+    if (offload_status_offloaded(status)) {
         dp_netdev_flow_ref(flow);
     }
     netdev_close(netdev);
