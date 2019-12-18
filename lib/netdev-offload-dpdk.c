@@ -28,6 +28,7 @@
 #include "packets.h"
 #include "uuid.h"
 #include "netdev-offload-dpdk-private.h"
+#include "odp-util.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk);
 
@@ -135,6 +136,44 @@ ufid_to_rte_flow_associate(struct netdev *netdev,
     ufid_to_flow_data_insert(netdev, data);
 }
 
+static void
+netdev_offload_dump_match(const struct match *match,
+                          const ovs_u128 *ufid,
+                          const struct nlattr *actions,
+                          const size_t actions_len, 
+                          const struct offload_info *info)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    struct ofpbuf key_buf, mask_buf;
+    struct odp_flow_key_parms odp_parms = {
+        .flow = &match->flow,
+        .mask = &match->wc.masks,
+        .support = *info->odp_support,
+    };
+
+    ofpbuf_init(&key_buf, 0);
+    ofpbuf_init(&mask_buf, 0);
+
+    odp_flow_key_from_flow(&odp_parms, &key_buf);
+    odp_parms.key_buf = &key_buf;
+    odp_flow_key_from_mask(&odp_parms, &mask_buf);
+
+    ds_put_cstr(&ds, "offload add: ");
+    odp_format_ufid(ufid, &ds);
+    ds_put_cstr(&ds, " ");
+    odp_flow_format(key_buf.data, key_buf.size,
+            mask_buf.data, mask_buf.size,
+            NULL, &ds, false);
+    ds_put_cstr(&ds, ", actions:");
+    format_odp_actions(&ds, actions, actions_len, NULL);
+
+    VLOG_INFO("%s", ds_cstr(&ds));
+
+    ofpbuf_uninit(&key_buf);
+    ofpbuf_uninit(&mask_buf);
+    ds_destroy(&ds);
+}
+
 static int
 netdev_offload_dpdk_add_flow(struct netdev *netdev,
                              const struct match *match,
@@ -159,8 +198,9 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
 
     ret = netdev_dpdk_flow_patterns_add(&patterns, match, info);
     if (ret) {
-        VLOG_WARN("Adding rte match patterns for flow ufid"UUID_FMT" failed",
+        VLOG_WARN("Adding rte match patterns for flow ufid "UUID_FMT" failed",
                   UUID_ARGS((struct uuid *)ufid));
+        netdev_offload_dump_match(match, ufid, nl_actions, actions_len, info);
         goto out;
     }
 

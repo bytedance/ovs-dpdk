@@ -73,6 +73,7 @@ struct offload_info {
     uint8_t tunnel_csum_on; /* Tunnel header with checksum */
     int vport_type;
 
+    struct odp_support *odp_support;
     /*
      * The flow mark id assigened to the flow. If any pkts hit the flow,
      * it will be in the pkt meta data.

@@ -2993,6 +2993,8 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     struct offload_info info;
     
     memset(&info, 0, sizeof(info));
+
+    info.odp_support = &dp_netdev_support;
     const struct dpif_class *dpif_class = dp->class;
     info.dpif_class = dpif_class;
 
