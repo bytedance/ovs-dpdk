@@ -568,10 +568,14 @@ dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
 
     netdev = netdev_ports_get(in_port, offload->class);
     if (!netdev) {
-        /* netdev missed, must be deleted*/
+        /* this should never happens, if any netdev is 
+         * removed, all hw flows should be removed first!
+         * The only possible is that this flow has never
+         * been offloaded before.
+         */
+        VLOG_ERR("try to del a flow that does not has a valid inport!\n");
         atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
             memory_order_release);
-        dp_netdev_flow_unref(flow);
         return -1;
     }
 
