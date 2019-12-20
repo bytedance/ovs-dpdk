@@ -23,6 +23,8 @@
 
 #include "dpif.h"
 #include "cmap.h"
+#include "ovs-atomic.h"
+#include "dpif-netdev-offload.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -119,6 +121,125 @@ netdev_flow_key_gen_masks(const struct netdev_flow_key *tbl,
 /* Matches a dpcls rule against the incoming packet in 'target' */
 bool dpcls_rule_matches_key(const struct dpcls_rule *rule,
                             const struct netdev_flow_key *target);
+
+/* Contained by struct dp_netdev_flow's 'stats' member.  */
+struct dp_netdev_flow_stats {
+    atomic_llong used;             /* Last used time, in monotonic msecs. */
+    atomic_ullong packet_count;    /* Number of packets matched. */
+    atomic_ullong byte_count;      /* Number of bytes matched. */
+    atomic_uint16_t tcp_flags;     /* Bitwise-OR of seen tcp_flags values. */
+};
+
+/* A set of datapath actions within a "struct dp_netdev_flow".
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * A struct dp_netdev_actions 'actions' is protected with RCU. */
+struct dp_netdev_actions {
+    /* These members are immutable: they do not change during the struct's
+     * lifetime.  */
+    unsigned int size;          /* Size of 'actions', in bytes. */
+    struct nlattr actions[];    /* Sequence of OVS_ACTION_ATTR_* attributes. */
+};
+
+struct dp_netdev_actions *dp_netdev_actions_create(const struct nlattr *, size_t);
+struct dp_netdev_actions *dp_netdev_flow_get_actions(const struct dp_netdev_flow *);
+void dp_netdev_actions_free(struct dp_netdev_actions *);
+
+struct packet_batch_per_flow;
+/* A flow in 'dp_netdev_pmd_thread's 'flow_table'.
+ *
+ *
+ * Thread-safety
+ * =============
+ *
+ * Except near the beginning or ending of its lifespan, rule 'rule' belongs to
+ * its pmd thread's classifier.  The text below calls this classifier 'cls'.
+ *
+ * Motivation
+ * ----------
+ *
+ * The thread safety rules described here for "struct dp_netdev_flow" are
+ * motivated by two goals:
+ *
+ *    - Prevent threads that read members of "struct dp_netdev_flow" from
+ *      reading bad data due to changes by some thread concurrently modifying
+ *      those members.
+ *
+ *    - Prevent two threads making changes to members of a given "struct
+ *      dp_netdev_flow" from interfering with each other.
+ *
+ *
+ * Rules
+ * -----
+ *
+ * A flow 'flow' may be accessed without a risk of being freed during an RCU
+ * grace period.  Code that needs to hold onto a flow for a while
+ * should try incrementing 'flow->ref_cnt' with dp_netdev_flow_ref().
+ *
+ * 'flow->ref_cnt' protects 'flow' from being freed.  It doesn't protect the
+ * flow from being deleted from 'cls' and it doesn't protect members of 'flow'
+ * from modification.
+ *
+ * Some members, marked 'const', are immutable.  Accessing other members
+ * requires synchronization, as noted in more detail below.
+ */
+struct dp_netdev_flow {
+    const struct flow flow;      /* Unmasked flow that created this entry. */
+    /* Hash table index by unmasked flow. */
+    const struct cmap_node node; /* In owning dp_netdev_pmd_thread's */
+                                 /* 'flow_table'. */
+    const ovs_u128 ufid;         /* Unique flow identifier. */
+    const ovs_u128 mega_ufid;    /* Unique mega flow identifier. */
+    const unsigned pmd_id;       /* The 'core_id' of pmd thread owning this */
+                                 /* flow. */
+
+    /* Number of references.
+     * The classifier owns one reference.
+     * Any thread trying to keep a rule from being freed should hold its own
+     * reference. */
+    struct ovs_refcount ref_cnt;
+
+    bool dead;
+    enum offload_status status; /* offload status */
+
+    /* Statistics. */
+    struct dp_netdev_flow_stats stats;
+
+    /* Actions. */
+    OVSRCU_TYPE(struct dp_netdev_actions *) actions;
+
+    /* While processing a group of input packets, the datapath uses the next
+     * member to store a pointer to the output batch for the flow.  It is
+     * reset after the batch has been sent out (See dp_netdev_queue_batches(),
+     * packet_batch_per_flow_init() and packet_batch_per_flow_execute()). */
+    struct packet_batch_per_flow *batch;
+
+    /* Packet classification. */
+    struct dpcls_rule cr;        /* In owning dp_netdev's 'cls'. */
+    /* 'cr' must be the last member. */
+};
+
+static inline bool
+dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
+{
+    enum offload_status status;
+    atomic_read_explicit(&flow->status, &status, memory_order_acquire);
+    return offload_status_offloaded(status);
+}
+
+static inline uint32_t
+dp_netdev_flow_hash(const ovs_u128 *ufid) {
+    return ufid->u32[0];
+}
+
+
+void dp_netdev_flow_unref(struct dp_netdev_flow *flow);
+bool dp_netdev_flow_ref(struct dp_netdev_flow *flow);
+
+extern struct odp_support dp_netdev_support;
 
 #ifdef  __cplusplus
 }

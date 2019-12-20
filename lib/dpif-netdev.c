@@ -118,7 +118,7 @@ static struct vlog_rate_limit upcall_rl = VLOG_RATE_LIMIT_INIT(600, 600);
                                      | CS_SRC_NAT | CS_DST_NAT)
 #define DP_NETDEV_CS_UNSUPPORTED_MASK (~(uint32_t)DP_NETDEV_CS_SUPPORTED_MASK)
 
-static struct odp_support dp_netdev_support = {
+struct odp_support dp_netdev_support = {
     .max_vlan_headers = SIZE_MAX,
     .max_mpls_depth = SIZE_MAX,
     .recirc = true,
@@ -287,15 +287,6 @@ struct pmd_auto_lb {
     uint64_t rebalance_poll_timer;
 };
 
-struct dp_flow_offload {
-    struct ovs_mutex mutex;
-    struct ovs_list list;
-    pthread_cond_t cond;
-    pthread_t thread;
-    bool exit;
-    bool process;
-};
-
 /* Datapath based on the network device interface from netdev.h.
  *
  *
@@ -405,16 +396,6 @@ enum rxq_cycles_counter_type {
     RXQ_N_CYCLES
 };
 
-struct dp_flow_offload_item {
-    struct dp_netdev *dp;
-    struct dp_netdev_flow *flow;
-    struct dp_netdev_actions *dp_act;
-    struct dp_netdev_actions *old_dp_act;
-    int op;
-    struct ovs_list node;
-};
-
-
 #define XPS_TIMEOUT 500000LL    /* In microseconds. */
 
 /* Contained by struct dp_netdev_port's 'rxqs' member.  */
@@ -453,137 +434,12 @@ struct dp_netdev_port {
     char *rxq_affinity_list;    /* Requested affinity of rx queues. */
 };
 
-/* Contained by struct dp_netdev_flow's 'stats' member.  */
-struct dp_netdev_flow_stats {
-    atomic_llong used;             /* Last used time, in monotonic msecs. */
-    atomic_ullong packet_count;    /* Number of packets matched. */
-    atomic_ullong byte_count;      /* Number of bytes matched. */
-    atomic_uint16_t tcp_flags;     /* Bitwise-OR of seen tcp_flags values. */
-};
 
-enum offload_status {
-    OFFLOAD_NONE,    /* not tried */
-    OFFLOAD_FAILED,  /* tried but failed, not need to try again */
-    OFFLOAD_MASK,    /* mask offloaded */
-    OFFLOAD_FULL,    /* full offloaded */ 
-    OFFLOAD_PARTIAL, /* ingress offload */
-};
-
-/* A flow in 'dp_netdev_pmd_thread's 'flow_table'.
- *
- *
- * Thread-safety
- * =============
- *
- * Except near the beginning or ending of its lifespan, rule 'rule' belongs to
- * its pmd thread's classifier.  The text below calls this classifier 'cls'.
- *
- * Motivation
- * ----------
- *
- * The thread safety rules described here for "struct dp_netdev_flow" are
- * motivated by two goals:
- *
- *    - Prevent threads that read members of "struct dp_netdev_flow" from
- *      reading bad data due to changes by some thread concurrently modifying
- *      those members.
- *
- *    - Prevent two threads making changes to members of a given "struct
- *      dp_netdev_flow" from interfering with each other.
- *
- *
- * Rules
- * -----
- *
- * A flow 'flow' may be accessed without a risk of being freed during an RCU
- * grace period.  Code that needs to hold onto a flow for a while
- * should try incrementing 'flow->ref_cnt' with dp_netdev_flow_ref().
- *
- * 'flow->ref_cnt' protects 'flow' from being freed.  It doesn't protect the
- * flow from being deleted from 'cls' and it doesn't protect members of 'flow'
- * from modification.
- *
- * Some members, marked 'const', are immutable.  Accessing other members
- * requires synchronization, as noted in more detail below.
- */
-struct dp_netdev_flow {
-    const struct flow flow;      /* Unmasked flow that created this entry. */
-    /* Hash table index by unmasked flow. */
-    const struct cmap_node node; /* In owning dp_netdev_pmd_thread's */
-                                 /* 'flow_table'. */
-    const ovs_u128 ufid;         /* Unique flow identifier. */
-    const ovs_u128 mega_ufid;    /* Unique mega flow identifier. */
-    const unsigned pmd_id;       /* The 'core_id' of pmd thread owning this */
-                                 /* flow. */
-
-    /* Number of references.
-     * The classifier owns one reference.
-     * Any thread trying to keep a rule from being freed should hold its own
-     * reference. */
-    struct ovs_refcount ref_cnt;
-
-    bool dead;
-    enum offload_status status; /* offload status */
-
-    /* Statistics. */
-    struct dp_netdev_flow_stats stats;
-
-    /* Actions. */
-    OVSRCU_TYPE(struct dp_netdev_actions *) actions;
-
-    /* While processing a group of input packets, the datapath uses the next
-     * member to store a pointer to the output batch for the flow.  It is
-     * reset after the batch has been sent out (See dp_netdev_queue_batches(),
-     * packet_batch_per_flow_init() and packet_batch_per_flow_execute()). */
-    struct packet_batch_per_flow *batch;
-
-    /* Packet classification. */
-    struct dpcls_rule cr;        /* In owning dp_netdev's 'cls'. */
-    /* 'cr' must be the last member. */
-};
-
-static void dp_netdev_flow_unref(struct dp_netdev_flow *);
-static bool dp_netdev_flow_ref(struct dp_netdev_flow *);
 static int dpif_netdev_flow_from_nlattrs(const struct nlattr *, uint32_t,
                                          struct flow *, bool);
 
-static inline bool
-offload_status_offloaded(enum offload_status status)
-{
-    return status == OFFLOAD_MASK || \
-                status == OFFLOAD_FULL || \
-                status == OFFLOAD_PARTIAL;
-}
-static inline bool
-dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
-{
-    enum offload_status status;
-    atomic_read_explicit(&flow->status, &status, memory_order_acquire);
-    return offload_status_offloaded(status);
-}
-
 static void
 dp_netdev_get_mega_ufid(const struct match *match, ovs_u128 *mega_ufid);
-
-/* A set of datapath actions within a "struct dp_netdev_flow".
- *
- *
- * Thread-safety
- * =============
- *
- * A struct dp_netdev_actions 'actions' is protected with RCU. */
-struct dp_netdev_actions {
-    /* These members are immutable: they do not change during the struct's
-     * lifetime.  */
-    unsigned int size;          /* Size of 'actions', in bytes. */
-    struct nlattr actions[];    /* Sequence of OVS_ACTION_ATTR_* attributes. */
-};
-
-struct dp_netdev_actions *dp_netdev_actions_create(const struct nlattr *,
-                                                   size_t);
-struct dp_netdev_actions *dp_netdev_flow_get_actions(
-    const struct dp_netdev_flow *);
-static void dp_netdev_actions_free(struct dp_netdev_actions *);
 
 struct polled_queue {
     struct dp_netdev_rxq *rxq;
@@ -870,8 +726,6 @@ static void smc_clear_entry(struct smc_bucket *b, int idx);
 static void dp_netdev_request_reconfigure(struct dp_netdev *dp);
 static inline bool
 pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd);
-static void queue_netdev_flow_del(struct dp_netdev *dp,
-                                  struct dp_netdev_flow *flow);
 
 static void
 emc_cache_init(struct emc_cache *flow_cache)
@@ -1527,21 +1381,6 @@ choose_port(struct dp_netdev *dp, const char *name)
     return ODPP_NONE;
 }
 
-static void *
-dp_netdev_flow_offload_main(void *data);
-
-static void
-dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload)
-{
-    ovs_mutex_init(&dp_flow_offload->mutex);
-    ovs_list_init(&dp_flow_offload->list);
-    xpthread_cond_init(&dp_flow_offload->cond, NULL);
-    dp_flow_offload->exit =  false;
-    dp_flow_offload->thread = \
-        ovs_thread_create("hw_offload",
-                          dp_netdev_flow_offload_main, dp_flow_offload);
-}
-
 static int
 create_dp_netdev(const char *name, const struct dpif_class *class,
                  struct dp_netdev **dpp)
@@ -1678,41 +1517,6 @@ dp_delete_meter(struct dp_netdev *dp, uint32_t meter_id)
     }
 }
 
-static void
-dp_netdev_wait_offload_done(struct dp_flow_offload *offload)
-{
-    bool process;
-    bool target;
-
-    do {
-        atomic_read_explicit(&offload->process, &process, memory_order_acquire);
-        if (process == false) {
-            /* not processing, check if no flows */
-            ovs_mutex_lock(&offload->mutex);
-            if (!ovs_list_is_empty(&offload->list)) {
-                xpthread_cond_signal(&offload->cond);
-                target = true;
-            } else {
-                target = false;
-            }
-            ovs_mutex_unlock(&offload->mutex);
-        } else {
-            /* processing */
-            target = false;
-        }
-    } while (process != target);
-}
-
-static void
-dp_netdev_join_offload_thread(struct dp_flow_offload *offload)
-{
-    ovs_mutex_lock(&offload->mutex);
-    atomic_store_explicit(&offload->exit, true, memory_order_release);
-    xpthread_cond_signal(&offload->cond);
-    ovs_mutex_unlock(&offload->mutex);
-    xpthread_join(offload->thread, NULL);
-}
-
 /* Requires dp_netdev_mutex so that we can't get a new reference to 'dp'
  * through the 'dp_netdevs' shash while freeing 'dp'. */
 static void
@@ -1805,21 +1609,6 @@ dpif_netdev_destroy(struct dpif *dpif)
     return 0;
 }
 
-/* Add 'n' to the atomic variable 'var' non-atomically and using relaxed
- * load/store semantics.  While the increment is not atomic, the load and
- * store operations are, making it impossible to read inconsistent values.
- *
- * This is used to update thread local stats counters. */
-static void
-non_atomic_ullong_add(atomic_ullong *var, unsigned long long n)
-{
-    unsigned long long tmp;
-
-    atomic_read_relaxed(var, &tmp);
-    tmp += n;
-    atomic_store_relaxed(var, tmp);
-}
-
 static int
 dpif_netdev_get_stats(const struct dpif *dpif, struct dpif_dp_stats *stats)
 {
@@ -1865,36 +1654,6 @@ hash_port_no(odp_port_t port_no)
     return hash_int(odp_to_u32(port_no), 0);
 }
 
-struct tnl_offload_aux {
-    struct ovs_rwlock rwlock;
-    struct hmap ingress_flows;
-    struct hmap tnl_pop_flows;
-};
-
-static struct tnl_offload_aux *
-tnl_offload_aux_new(void)
-{
-    struct tnl_offload_aux *aux = xzalloc(sizeof(*aux));
-    hmap_init(&aux->ingress_flows);
-    hmap_init(&aux->tnl_pop_flows);
-    ovs_rwlock_init(&aux->rwlock);
-    return aux;
-}
-
-static void
-ingress_flow_flush(struct tnl_offload_aux *aux);
-static void
-tnlflow_flush(struct tnl_offload_aux *aux);
-
-static void
-tnl_offload_aux_free(void *offload_aux) {
-    struct tnl_offload_aux *aux = offload_aux;
-    ingress_flow_flush(aux);
-    tnlflow_flush(aux);
-    hmap_destroy(&aux->ingress_flows);
-    hmap_destroy(&aux->tnl_pop_flows);
-    ovs_rwlock_destroy(&aux->rwlock);
-}
 static int
 port_create(const char *devname, const char *type,
             odp_port_t port_no, struct dp_netdev_port **portp)
@@ -2010,21 +1769,6 @@ dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev,
 
     return error;
 }
-
-/* tnl pop ingress flow */
-struct ingress_flow {
-    struct dp_netdev_flow *flow;
-    struct netdev *ingress_netdev;
-    enum offload_status status;
-    struct hmap_node node;
-};
-
-/* tnl pop flow */
-struct tnl_pop_flow {
-    struct dp_netdev_flow *flow;
-    enum offload_status status;
-    struct hmap_node node;
-};
 
 static int
 dpif_netdev_port_del(struct dpif *dpif, odp_port_t port_no)
@@ -2202,17 +1946,11 @@ dp_netdev_flow_free(struct dp_netdev_flow *flow)
     free(flow);
 }
 
-static void dp_netdev_flow_unref(struct dp_netdev_flow *flow)
+void dp_netdev_flow_unref(struct dp_netdev_flow *flow)
 {
     if (ovs_refcount_unref_relaxed(&flow->ref_cnt) == 1) {
         ovsrcu_postpone(dp_netdev_flow_free, flow);
     }
-}
-
-static uint32_t
-dp_netdev_flow_hash(const ovs_u128 *ufid)
-{
-    return ufid->u32[0];
 }
 
 static inline struct dpcls *
@@ -2249,943 +1987,6 @@ dp_netdev_pmd_find_dpcls(struct dp_netdev_pmd_thread *pmd,
     return cls;
 }
 
-static struct dp_flow_offload_item *
-dp_netdev_alloc_flow_offload(struct dp_netdev *dp,
-                             struct dp_netdev_flow *flow,
-                             struct dp_netdev_actions *old_act,
-                             int op)
-{
-    struct dp_flow_offload_item *offload;
-
-    offload = xzalloc(sizeof(*offload));
-    offload->dp = dp;
-    offload->flow = flow;
-    offload->op = op;
-    /* if get actions here, the actions might be 
-     * freed during the queueing.
-     */
-    offload->dp_act = NULL; 
-    if (old_act)
-        offload->old_dp_act = \
-                    dp_netdev_actions_create(\
-                            old_act->actions, \
-                                old_act->size);
-    dp_netdev_flow_ref(flow);
-
-    return offload;
-}
-
-static void
-dp_netdev_free_flow_offload(struct dp_flow_offload_item *offload)
-{
-    dp_netdev_flow_unref(offload->flow);
-
-    dp_netdev_actions_free(offload->old_dp_act);
-    free(offload);
-}
-
-static void
-dp_netdev_append_flow_offload(struct dp_flow_offload *dp_flow_offload,
-                                struct dp_flow_offload_item *offload)
-{
-    ovs_mutex_lock(&dp_flow_offload->mutex);
-    ovs_list_push_back(&dp_flow_offload->list, &offload->node);
-    if (!dp_flow_offload->process) {
-        xpthread_cond_signal(&dp_flow_offload->cond);
-    }
-    ovs_mutex_unlock(&dp_flow_offload->mutex);
-}
-
-static void
-tnl_pop_flow_get_ufid(struct ingress_flow *inflow,\
-                      struct tnl_pop_flow *tnlflow, \
-                      ovs_u128 *ufid)
-{
-    ufid->u64.hi = inflow->flow->mega_ufid.u64.hi ^ tnlflow->flow->mega_ufid.u64.hi;
-    ufid->u64.lo = inflow->flow->mega_ufid.u64.lo ^ tnlflow->flow->mega_ufid.u64.lo;
-}
-
-static const struct nlattr *
-dp_netdev_action_get(const struct nlattr *actions,
-                     size_t act_len, enum ovs_action_attr type)
-{
-    const struct nlattr *a;
-    unsigned int left;
-
-    NL_ATTR_FOR_EACH_UNSAFE (a, left, actions, act_len) {
-        int _type = nl_attr_type(a);
-        if ((enum ovs_action_attr)_type == type) {
-            return a;
-        }
-    }
-    return NULL;
-}
-
-static struct ingress_flow *
-ingress_flow_find(struct dp_netdev_flow *flow,\
-                  struct tnl_offload_aux *aux, \
-                  bool *found)
-{
-    *found = false;
-
-    struct ingress_flow *inflow = NULL;
-
-    ovs_rwlock_rdlock(&aux->rwlock);
-    HMAP_FOR_EACH_WITH_HASH(inflow, node,
-            dp_netdev_flow_hash(&flow->mega_ufid), &aux->ingress_flows) {
-        if (ovs_u128_equals(inflow->flow->mega_ufid, flow->mega_ufid)) {
-            *found = true;
-            break;
-        }
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-    return inflow;
-}
-
-static void
-ingress_flow_free(struct ingress_flow *inflow)
-{
-    dp_netdev_flow_unref(inflow->flow);
-    netdev_close(inflow->ingress_netdev);
-    free(inflow);
-}
-
-static void
-ingress_flow_del(struct ingress_flow *inflow,\
-                 struct tnl_offload_aux *aux)
-{
-    ovs_rwlock_wrlock(&aux->rwlock);
-    hmap_remove(&aux->ingress_flows, &inflow->node);
-    ovs_rwlock_unlock(&aux->rwlock);
-
-    ingress_flow_free(inflow);
-}
-
-static struct ingress_flow *
-ingress_flow_new(struct dp_netdev_flow *flow, \
-                 struct netdev *inport)
-{
-    struct ingress_flow *inflow;
-
-    inflow = xzalloc(sizeof(struct ingress_flow));
-    inflow->ingress_netdev = inport;
-    inflow->flow = flow;
-
-    netdev_ref(inflow->ingress_netdev);
-    dp_netdev_flow_ref(flow);
-    return inflow;
-}
-
-static void
-ingress_flow_insert(struct tnl_offload_aux *aux,
-                    struct ingress_flow *inflow)
-{
-    ovs_rwlock_wrlock(&aux->rwlock);
-    hmap_insert(&aux->ingress_flows, &inflow->node, \
-                dp_netdev_flow_hash(&inflow->flow->mega_ufid)); 
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-
-static void
-ingress_flow_flush(struct tnl_offload_aux *aux)
-{
-    struct ingress_flow *inflow;
-    ovs_rwlock_wrlock(&aux->rwlock);
-    HMAP_FOR_EACH_POP(inflow, node, &aux->ingress_flows) {
-        ingress_flow_free(inflow);
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-
-static int 
-tnl_pop_flow_op_put(struct ingress_flow *inflow,\
-                    struct tnl_pop_flow *tnlflow,\
-                    struct dp_netdev_actions *act, \
-                    struct offload_info *info)
-{
-    int ret;
-
-    /* set inner info */
-    struct match tnl_m; 
-    miniflow_expand(&tnlflow->flow->cr.flow.mf, &tnl_m.flow);
-    miniflow_expand(&tnlflow->flow->cr.mask->mf, &tnl_m.wc.masks);
-    memset(&tnl_m.tun_md, 0, sizeof tnl_m.tun_md);
-
-    /* set outter info */
-    struct flow in_flow;
-    miniflow_expand(&inflow->flow->cr.flow.mf, &in_flow);
-    info->tp_dst_port = in_flow.tp_dst; 
-    memcpy(&info->tun_dl_dst, &in_flow.dl_dst, sizeof(struct eth_addr));
-    info->tun_dst = in_flow.nw_dst;
-
-    /*FIXME: use tnlflow->in_port and netdev_get_type to set vport_type */
-    info->vport_type = VPORT_VXLAN;
-
-    ovs_u128 mega_ufid;
-    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-
-    if (act->size > 0 && dp_netdev_action_get(act->actions, act->size, \
-                    OVS_ACTION_ATTR_OUTPUT)) {
-        info->need_decap = 1;
-    } else {
-        /* does not has output, might be drop.
-         * accoridng to mlnx dpdk, decap and drop
-         * cannot co-exist
-         */
-        info->need_decap = 0;
-    }
-
-    ret = netdev_flow_put(inflow->ingress_netdev, &tnl_m,
-            act->actions, act->size, &mega_ufid, info,
-            NULL);
-    return ret;
-}
-
-static int
-tnl_pop_flow_op_del(struct ingress_flow *inflow, \
-                    struct tnl_pop_flow *tnlflow)
-{
-    int ret;
-    ovs_u128 mega_ufid;
-    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-    ret = netdev_flow_del(inflow->ingress_netdev, \
-                            &mega_ufid, NULL);
-    return ret;
-}
-
-static int
-tnl_pop_flow_op_stat(struct ingress_flow *inflow, \
-                     struct tnl_pop_flow *tnlflow, \
-                     struct dpif_flow_stats *stats)
-{
-    int ret;
-    ovs_u128 mega_ufid;
-    tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-    ret = netdev_flow_stats_get(inflow->ingress_netdev, \
-                                &mega_ufid, stats);
-    return ret;
-}
-
-static void
-tnlflow_free(struct tnl_pop_flow *tnlflow)
-{
-    dp_netdev_flow_unref(tnlflow->flow);
-    free(tnlflow);
-}
-
-static void
-tnlflow_del(struct tnl_pop_flow *tnlflow, \
-                 struct tnl_offload_aux *aux)
-{
-    ovs_rwlock_wrlock(&aux->rwlock);
-    hmap_remove(&aux->tnl_pop_flows, &tnlflow->node);
-    ovs_rwlock_unlock(&aux->rwlock);
-
-    tnlflow_free(tnlflow);
-}
-
-static void
-tnlflow_flush(struct tnl_offload_aux *aux)
-{
-    struct tnl_pop_flow *tnlflow;
-    ovs_rwlock_wrlock(&aux->rwlock);
-    HMAP_FOR_EACH_POP(tnlflow, node, &aux->tnl_pop_flows) {
-        tnlflow_free(tnlflow);
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-
-static void
-__ingress_flow_op_flush(struct ingress_flow *inflow, \
-                        struct tnl_offload_aux *aux)
-{
-    struct tnl_pop_flow *tnlflow;
-    HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-        tnl_pop_flow_op_del(inflow, tnlflow);
-    }
-}
-
-static void
-ingress_flow_op_flush(struct ingress_flow *inflow, \
-                      struct tnl_offload_aux *aux)
-{
-    ovs_rwlock_rdlock(&aux->rwlock);
-    __ingress_flow_op_flush(inflow, aux); 
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-static void
-__tnlflow_op_flush(struct tnl_pop_flow *tnlflow, \
-                    struct tnl_offload_aux *aux)
-{
-    struct ingress_flow *inflow;
-    HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-        tnl_pop_flow_op_del(inflow, tnlflow);
-    }
-}
-
-static void
-tnlflow_op_flush(struct tnl_pop_flow *tnlflow, \
-                 struct tnl_offload_aux *aux)
-{
-    ovs_rwlock_rdlock(&aux->rwlock);
-    __tnlflow_op_flush(tnlflow, aux); 
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-
-static enum offload_status
-try_offload_tnl_pop(struct ingress_flow *inflow,\
-                    struct tnl_offload_aux *aux,\
-                    struct offload_info *info)
-{
-    struct tnl_pop_flow *tnlflow;
-    int ret;
-    bool need_rollback = false;
-
-    ovs_rwlock_rdlock(&aux->rwlock);
-    HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-        tnlflow->status = OFFLOAD_NONE;
-    }
-
-    HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-        ret = tnl_pop_flow_op_put(inflow, tnlflow, \
-                                    dp_netdev_flow_get_actions(tnlflow->flow), \
-                                    info);
-        if (ret == -1) {
-            need_rollback = true;
-            break;
-        } else {
-            tnlflow->status = OFFLOAD_FULL;
-        }
-    }
-
-    if (need_rollback) {
-        HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-            if (tnlflow->status == OFFLOAD_FULL) {
-                tnl_pop_flow_op_del(inflow, tnlflow);
-            }
-        }
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-
-    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
-}
-
-static struct tnl_pop_flow*
-tnlflow_find(struct dp_netdev_flow *flow, \
-             struct tnl_offload_aux *aux, \
-             bool *found)
-{
-    struct tnl_pop_flow *tnlflow;
-    *found = false;
-
-    ovs_rwlock_rdlock(&aux->rwlock);
-    HMAP_FOR_EACH_WITH_HASH(tnlflow, node, \
-                            dp_netdev_flow_hash(&flow->mega_ufid), \
-                            &aux->tnl_pop_flows) {
-        if (ovs_u128_equals(tnlflow->flow->mega_ufid, flow->mega_ufid)) {
-            *found = true;
-            break;
-        }
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-    return tnlflow;
-}
-
-static struct tnl_pop_flow*
-tnlflow_new(struct dp_netdev_flow *flow)
-{
-    struct tnl_pop_flow *tnlflow;
-    tnlflow = xzalloc(sizeof(struct tnl_pop_flow));
-    tnlflow->flow = flow;
-    dp_netdev_flow_ref(flow);
-    return tnlflow;
-}
-
-static void
-tnlflow_insert(struct tnl_offload_aux *aux, \
-               struct tnl_pop_flow *tnlflow)
-{
-    ovs_rwlock_wrlock(&aux->rwlock);
-    hmap_insert(&aux->tnl_pop_flows, \
-            &tnlflow->node, \
-            dp_netdev_flow_hash(&tnlflow->flow->mega_ufid));
-    ovs_rwlock_unlock(&aux->rwlock);
-}
-
-static struct netdev *
-try_ingress(struct dp_netdev_actions *act, \
-            struct dp_netdev *dp)
-{
-    const struct nlattr *tnl_pop = dp_netdev_action_get(act->actions,\
-            act->size, OVS_ACTION_ATTR_TUNNEL_POP);
-
-    if (!tnl_pop) {
-        return NULL;
-    }
-
-    odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
-    struct netdev *tnl_dev = netdev_ports_get(portno, dp->class);
-    if (!tnl_dev) {
-        return NULL;
-    }
-    return tnl_dev;
-}
-
-static int 
-del_ingress(struct dp_netdev_flow *flow,\
-            struct netdev *tnl_dev)
-{
-    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
-    struct tnl_offload_aux *aux  = vport->offload_aux;
-    // get old act and get vport 
-    bool found;
-    struct ingress_flow *inflow = ingress_flow_find(flow, aux, &found);
-    /* del all tnl_pop flows */
-    if (found) {
-        ingress_flow_op_flush(inflow, aux);
-        atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
-                        memory_order_release);
-        ingress_flow_del(inflow, aux);
-        netdev_close(tnl_dev);
-        return 0;
-    }
-    netdev_close(tnl_dev);
-    return -1;
-}
-
-static int
-try_del_ingress(struct dp_netdev_flow *flow, \
-                struct dp_netdev_actions *act, \
-                struct dp_netdev *dp)
-{
-    struct netdev *tnl_dev;
-    tnl_dev = try_ingress(act, dp);
-    if (!tnl_dev)
-        return -1;
-    return del_ingress(flow, tnl_dev);
-}
-
-static bool
-try_tnlflow(struct dp_netdev_flow *flow, \
-            struct netdev *inport)
-{
-    if(!flow_tnl_dst_is_set(&flow->flow.tunnel)) {
-        return false;
-    }
-    
-    if (!netdev_vport_is_vport_class(netdev_get_class(inport))) {
-        return false;
-    }
-
-    if (!netdev_get_tunnel_config(inport)) {
-        return false;
-    }
-
-    struct netdev_vport *vport = netdev_vport_cast(inport);
-
-    if (!vport->offload_aux) {
-        return false;
-    }
-    return true;
-}
-
-static int 
-try_del_tnlflow(struct dp_netdev_flow *flow, \
-                struct netdev *inport)
-{
-    bool is_tnlflow = try_tnlflow(flow, inport);
-    if (!is_tnlflow) {
-        return -1;
-    }
-
-    struct tnl_pop_flow *tnlflow;
-    bool found; 
-    struct netdev_vport * vport = netdev_vport_cast(inport);
-    struct tnl_offload_aux * aux = vport->offload_aux;
-    tnlflow = tnlflow_find(flow, aux, &found);
-    if (found) {
-       tnlflow_op_flush(tnlflow, aux); 
-       atomic_store_explicit(&tnlflow->flow->status, OFFLOAD_NONE, \
-                            memory_order_release);
-       tnlflow_del(tnlflow, aux);
-       return 0;
-    }
-    return -1;
-}
-
-static int
-dp_netdev_flow_offload_del(struct dp_flow_offload_item *offload)
-{
-    struct netdev *netdev;
-    struct dp_netdev_flow *flow = offload->flow;
-    odp_port_t in_port = flow->flow.in_port.odp_port;
-    struct dp_netdev *dp = offload->dp;
-    int ret = -1;
-
-    netdev = netdev_ports_get(in_port, dp->class);
-    if (!netdev) {
-        /* netdev missed, must be deleted*/
-        atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
-            memory_order_release);
-        dp_netdev_flow_unref(flow);
-        return -1;
-    }
-
-    ret = try_del_ingress(flow, offload->dp_act, dp);
-    if (!ret) {
-        goto exit;
-    }
-    ret = try_del_tnlflow(flow, netdev);
-    if (!ret) {
-        goto exit;
-    }
-    ret = netdev_flow_del(netdev, &flow->mega_ufid, NULL);
-    /* ignore ret */
-    atomic_store_explicit(&flow->status, OFFLOAD_NONE, \
-            memory_order_release);
-exit:
-    netdev_close(netdev);
-    if (ret) {
-        return -1;
-    } else {
-        dp_netdev_flow_unref(flow);
-    }
-    return 0;
-}
-
-static enum offload_status
-dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
-                              struct netdev *inport, \
-                              struct dp_flow_offload_item *offload, \
-                              struct offload_info *info)
-{
-    struct ingress_flow *inflow;
-    struct tnl_pop_flow *tnlflow;
-
-    bool is_tnlflow = try_tnlflow(flow, inport);
-    if (!is_tnlflow) {
-        return OFFLOAD_NONE;
-    }
-
-    int ret = 0;
-    bool need_rollback = false;
-
-    struct dp_netdev_actions *act = offload->dp_act;
-
-    bool found;
-    struct netdev_vport *vport = netdev_vport_cast(inport);
-    struct tnl_offload_aux * aux = vport->offload_aux;
-
-    /* if it's add, find will fail, new one.
-     * if it's mod, find might also fail, this is because
-     * the previous insertion might fail, so find will only fail
-     * let's try to insert anyway.
-     */
-    tnlflow = tnlflow_find(flow, aux, &found);
-    if (!found)
-        tnlflow = tnlflow_new(flow);
-
-    ovs_rwlock_rdlock(&aux->rwlock);
-    HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-        inflow->status = OFFLOAD_NONE;
-    }
-
-    HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-        ret = tnl_pop_flow_op_put(inflow, tnlflow, act, info);
-        if (ret == -1) {
-            need_rollback = true;
-            break;
-        } else {
-            inflow->status = OFFLOAD_FULL;
-        }
-    }
-
-    if (need_rollback) {
-        HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-            if (inflow->status == OFFLOAD_FULL) {
-                tnl_pop_flow_op_del(inflow, tnlflow);
-            }
-        }
-    }
-    ovs_rwlock_unlock(&aux->rwlock);
-
-    if (!found) {
-        if (!need_rollback) {
-            tnlflow_insert(aux, tnlflow);
-        } else {
-            tnlflow_free(tnlflow);
-        }
-        return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
-    }
-
-    /* mod */
-    if (need_rollback) {
-        tnlflow_del(tnlflow, aux);
-    }
-    return OFFLOAD_NONE;
-}
-
-static enum offload_status
-dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
-                                  struct netdev *inport,\
-                                  struct dp_flow_offload_item *offload, \
-                                  struct offload_info *info)
-{
-    struct dp_netdev_actions *act = offload->dp_act;
-    const struct nlattr *tnl_pop = dp_netdev_action_get(act->actions,\
-                                    act->size, OVS_ACTION_ATTR_TUNNEL_POP);
-    if (!tnl_pop) {
-        return OFFLOAD_NONE;
-    }
-
-    odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
-    struct netdev *tnl_dev = netdev_ports_get(portno, info->dpif_class);
-    if (!tnl_dev) {
-        return OFFLOAD_FAILED;
-    }
-    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
-    struct tnl_offload_aux *aux = vport->offload_aux;
-    struct ingress_flow *inflow;
-    bool found;
-    inflow = ingress_flow_find(flow, aux, &found);
-    /* multiple pmd thread has the same flow in
-     * pmd thread flow table
-     */
-    enum offload_status status;
-    if (found) {
-        status = try_offload_tnl_pop(inflow, aux, info);
-        netdev_close(tnl_dev);
-        goto exit;
-    }
-
-    inflow = ingress_flow_new(flow, inport);
-    ingress_flow_insert(aux, inflow);
-    status = try_offload_tnl_pop(inflow, aux, info);
-    netdev_close(tnl_dev);
-exit:
-    if (status == OFFLOAD_FAILED)
-        return OFFLOAD_PARTIAL;
-    else
-        return OFFLOAD_FULL;
-}
-
-static char *get_act_str(struct ds *ds, struct dp_netdev_actions *act)
-{
-    format_odp_actions(ds, act->actions, act->size, NULL);
-    return ds_cstr(ds);
-}
-
-static void dp_netdev_show_mod_act(struct dp_netdev_actions *act)
-{
-    struct ds ds;
-    ds_init(&ds);
-    VLOG_INFO("mod actions to:%s\n",  get_act_str(&ds, act));
-    ds_destroy(&ds);
-}
-
-static enum offload_status
-dp_netdev_try_offload_ingress(struct dp_netdev_flow *flow,\
-                              struct dp_netdev *dp, \
-                              struct netdev *inport,\
-                              struct dp_flow_offload_item *offload, \
-                              struct offload_info *info)
-{
-    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD)
-        return dp_netdev_try_offload_ingress_add(flow, inport, offload, info);
-
-    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD) {
-        struct dp_netdev_actions *act = offload->old_dp_act;
-        struct netdev *tnl_dev = try_ingress(act, dp);
-        if (!tnl_dev) {
-            return OFFLOAD_NONE;
-        }
-        VLOG_INFO("MOD an ingress flow on port %d\n",
-                flow->flow.in_port.odp_port);
-        dp_netdev_show_mod_act(dp_netdev_flow_get_actions(flow));
-        del_ingress(flow, tnl_dev);
-        return OFFLOAD_NONE;
-    }
-    return OFFLOAD_NONE;
-}
-
-static int
-dp_netdev_normal_offload(struct dp_netdev_flow *flow, \
-                         struct netdev *netdev, \
-                         struct dp_flow_offload_item *offload, \
-                         struct offload_info *info)
-{
-    struct match m; 
-    miniflow_expand(&flow->cr.flow.mf, &m.flow);
-    miniflow_expand(&flow->cr.mask->mf, &m.wc.masks);
-    memset(&m.tun_md, 0, sizeof m.tun_md);
-    int ret;
-    struct dp_netdev_actions *act = offload->dp_act;
-
-    ret = netdev_flow_put(netdev, &m, act->actions, \
-            act->size, &flow->mega_ufid, info, NULL);
-    return ret;
-}
-
-static bool
-is_port_tap(odp_port_t portno, const struct dpif_class *const class)
-{
-    struct netdev *dev = netdev_ports_get(portno, class);
-    if (!dev) {
-        return true;
-    }
-    netdev_close(dev);
-    return false;
-}
-
-static void 
-check_clone_actions(const struct nlattr *clone_act, \
-                    const size_t act_size, \
-                    const struct dpif_class *const class, \
-                    bool *check_ret)
-{
-    const struct nlattr *a;
-    unsigned int left;
-    *check_ret = false;
-
-    NL_ATTR_FOR_EACH_UNSAFE (a, left, clone_act, act_size) {
-        int _type = nl_attr_type(a);
-        if (_type == OVS_ACTION_ATTR_OUTPUT) {
-            /* "internal dev, tap dev, not offload */
-            odp_port_t portno = nl_attr_get_odp_port(a);
-            if (is_port_tap(portno, class)) {
-                return;
-            } else {
-                /* has fate action */
-                *check_ret = true;
-            }
-        }
-    }
-}
-
-static bool
-offload_check_action(struct dp_netdev_actions *act, \
-                     struct dp_netdev *dp)
-{
-    const struct nlattr *a;
-    unsigned int left;
-    bool offloadable = false;
-
-    NL_ATTR_FOR_EACH_UNSAFE (a, left, act->actions, act->size) {
-        int _type = nl_attr_type(a);
-        if (_type == OVS_ACTION_ATTR_OUTPUT) {
-            odp_port_t portno = nl_attr_get_odp_port(a);
-            /* tap dev not offload */
-            if (is_port_tap(portno, dp->class))
-                return false; 
-            else {
-                offloadable = true;
-            }
-        } else if (_type == OVS_ACTION_ATTR_CLONE) {
-            if (left <= NLA_ALIGN(a->nla_len)) {
-                const struct nlattr *clone_actions = nl_attr_get(a);
-                size_t clone_actions_len = nl_attr_get_size(a);
-                check_clone_actions(clone_actions, clone_actions_len, dp->class, &offloadable);
-            } else {
-                /* does not clone */
-                return false;
-            }
-        } else if (_type == OVS_ACTION_ATTR_TUNNEL_POP) {
-            offloadable = true;
-        }
-    }
-
-    if (act->size == 0) {
-        /* drop action */
-        offloadable = true;
-    }
-    return offloadable;
-}
-
-static int
-dp_netdev_try_offload(struct dp_flow_offload_item *offload)
-{
-    struct dp_netdev *dp = offload->dp;
-    struct dp_netdev_flow *flow = offload->flow;
-    odp_port_t in_port = flow->flow.in_port.odp_port;
-    struct offload_info info;
-    
-    memset(&info, 0, sizeof(info));
-
-    info.odp_support = &dp_netdev_support;
-    const struct dpif_class *dpif_class = dp->class;
-    info.dpif_class = dpif_class;
-
-    if (flow->dead) {
-        return -1;
-    }
-
-    struct netdev *netdev = netdev_ports_get(in_port, dpif_class);
-    if (!netdev) {
-        return -1;
-    }
-
-    /* if it's mod, the rule might exist in hw, so we can't
-     * check if the action is ok or not, but let it goes
-     * to netdev-offload layer, to let this rule replace
-     * the hw rule, if fails, the original hw rule will be deleted
-     *
-     * @NOTE: if it's mod, always return OFFLOAD_NONE, to make sure
-     * not ref dp_netdev_flow.
-     */
-    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD && \
-            !offload_check_action(offload->dp_act, dp)) {
-        netdev_close(netdev);
-        return -1;
-    }
-
-    enum offload_status status;
-    status = dp_netdev_try_offload_ingress(flow, dp, netdev, offload, &info);
-    int ret = 0;
-    if (status != OFFLOAD_NONE) {
-        atomic_store_explicit(&flow->status, status, memory_order_release);
-        goto exit;
-    }
-
-    status = dp_netdev_try_offload_tnl_pop(flow, netdev, offload, &info);
-    if (status != OFFLOAD_NONE) {
-        atomic_store_explicit(&flow->status, status, memory_order_release);
-        goto exit;
-    }
-
-    ret = dp_netdev_normal_offload(flow, netdev, offload, &info);
-    status = info.actions_offloaded ? OFFLOAD_FULL : OFFLOAD_FAILED;
-    atomic_store_explicit(&flow->status, status, memory_order_release);
-
-exit:
-    if (offload_status_offloaded(status)) {
-        dp_netdev_flow_ref(flow);
-    }
-    netdev_close(netdev);
-    return ret;
-}
- 
-/*
- * There are two flow offload operations here: addition and modification.
- *
- * For flow addition, this function does:
- * - allocate a new flow mark id
- * - perform hardware flow offload
- * - associate the flow mark with flow and mega flow
- *
- * For flow modification, both flow mark and the associations are still
- * valid, thus only item 2 needed.
- */
-static int
-dp_netdev_flow_offload_put(struct dp_flow_offload_item *offload)
-{
-    return dp_netdev_try_offload(offload);
-}
-
-static void *
-dp_netdev_flow_offload_main(void *data)
-{
-    struct dp_flow_offload_item *offload;
-    struct dp_flow_offload *dp_flow_offload = (struct dp_flow_offload*)data;
-    struct ovs_list *list;
-    const char *op;
-    int ret;
-    bool exit = false;
-
-    for (;;) {
-        ovs_mutex_lock(&dp_flow_offload->mutex);
-        if (ovs_list_is_empty(&dp_flow_offload->list)) {
-again:
-            dp_flow_offload->process = false;
-            ovsrcu_quiesce_start();
-            ovs_mutex_cond_wait(&dp_flow_offload->cond,
-                                &dp_flow_offload->mutex);
-            dp_flow_offload->process = true;
-            ovsrcu_quiesce_end();
-        }
-
-        atomic_read_explicit(&dp_flow_offload->exit, &exit, memory_order_acquire);
-        if (!ovs_list_is_empty(&dp_flow_offload->list)) {
-            list = ovs_list_pop_front(&dp_flow_offload->list);
-            offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
-        } else if (exit) {
-            ovs_mutex_unlock(&dp_flow_offload->mutex);
-            break;
-        } else {
-            goto again;
-        }
-
-        ovs_mutex_unlock(&dp_flow_offload->mutex);
-
-        /*  get actions here, act will not be freed as 
-         *  this is not in a grace period.
-         */
-        offload->dp_act = dp_netdev_flow_get_actions(offload->flow);
-        switch (offload->op) {
-        case DP_NETDEV_FLOW_OFFLOAD_OP_ADD:
-            op = "add";
-            ret = dp_netdev_flow_offload_put(offload);
-            break;
-        case DP_NETDEV_FLOW_OFFLOAD_OP_MOD:
-            op = "mod";
-            ret = dp_netdev_flow_offload_put(offload);
-            break;
-        case DP_NETDEV_FLOW_OFFLOAD_OP_DEL:
-            op = "delete";
-            ret = dp_netdev_flow_offload_del(offload);
-            break;
-        default:
-            OVS_NOT_REACHED();
-        }
-
-        VLOG_DBG("%s to %s netdev flow\n",
-                 ret == 0 ? "succeed" : "failed", op);
-
-        dp_netdev_free_flow_offload(offload);
-    }
-
-    ovs_mutex_lock(&dp_flow_offload->mutex);
-    for (;!ovs_list_is_empty(&dp_flow_offload->list);) {
-        list = ovs_list_pop_front(&dp_flow_offload->list);
-        offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
-        dp_netdev_free_flow_offload(offload);
-    }
-    ovs_mutex_unlock(&dp_flow_offload->mutex);
-    VLOG_INFO("hw_offload exit\n");
-
-    return NULL;
-}
-
-static void
-queue_netdev_flow_del(struct dp_netdev *dp,
-                      struct dp_netdev_flow *flow)
-{
-    struct dp_flow_offload_item *offload;
-
-    offload = dp_netdev_alloc_flow_offload(dp, flow, NULL, 
-                                           DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
-    dp_netdev_append_flow_offload(&dp->dp_flow_offload, offload);
-}
-
-static void
-queue_netdev_flow_put(struct dp_netdev *dp,\
-                      struct dp_netdev_flow *flow, \
-                      struct dp_netdev_actions *old_act, \
-                      int op)
-{
-    struct dp_flow_offload_item *offload;
-
-    if (!netdev_is_flow_api_enabled()) {
-        return;
-    }
-
-    if (dp->dp_flow_offload.exit) {
-        return;
-    }
-
-    offload = dp_netdev_alloc_flow_offload(dp, flow, old_act, op);
-    dp_netdev_append_flow_offload(&dp->dp_flow_offload, offload);
-}
-
 static void
 dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
                           struct dp_netdev_flow *flow)
@@ -3200,7 +2001,7 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     dpcls_remove(cls, &flow->cr);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
     if (dp_netdev_flow_offload(flow)) {
-        queue_netdev_flow_del(pmd->dp, flow);
+        queue_netdev_flow_del(&pmd->dp->dp_flow_offload, pmd->dp->class, flow);
     }
     flow->dead = true;
 
@@ -3316,7 +2117,7 @@ dp_netdev_flow_cast(const struct dpcls_rule *cr)
     return cr ? CONTAINER_OF(cr, struct dp_netdev_flow, cr) : NULL;
 }
 
-static bool dp_netdev_flow_ref(struct dp_netdev_flow *flow)
+bool dp_netdev_flow_ref(struct dp_netdev_flow *flow)
 {
     return ovs_refcount_try_ref_rcu(&flow->ref_cnt);
 }
@@ -3910,7 +2711,9 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     cmap_insert(&pmd->flow_table, CONST_CAST(struct cmap_node *, &flow->node),
                 dp_netdev_flow_hash(&flow->ufid));
 
-    queue_netdev_flow_put(pmd->dp, flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+    queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                            pmd->dp->class, \
+                flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
 
     if (OVS_UNLIKELY(!VLOG_DROP_DBG((&upcall_rl)))) {
         struct ds ds = DS_EMPTY_INITIALIZER;
@@ -3999,7 +2802,9 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
-            queue_netdev_flow_put(pmd->dp, netdev_flow, old_actions, \
+            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                                    pmd->dp->class, \
+                                    netdev_flow, old_actions, \
                                         DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
 
             if (stats) {
@@ -4249,134 +3054,6 @@ dpif_netdev_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread_)
 }
 
 static int
-try_ingress_stats(struct dp_netdev_flow *flow, \
-                  struct dp_netdev_actions *act, \
-                  struct dp_netdev *dp, \
-                  long long now, \
-                  struct dpif_flow_stats *stats)
-{
-    struct netdev *tnl_dev = \
-                        try_ingress(act, dp);
-    if (!tnl_dev) {
-        return -1;
-    }
-    struct netdev_vport *vport = netdev_vport_cast(tnl_dev);  
-    struct tnl_offload_aux *aux = vport->offload_aux;
-
-    bool found;
-    struct ingress_flow *inflow = \
-                        ingress_flow_find(flow, aux, &found);
-    if (found) {
-        struct dpif_flow_stats _stats;
-        struct tnl_pop_flow *tnlflow;
-        int ret;
-        _stats.used = now / 1000; 
-
-        ovs_rwlock_rdlock(&aux->rwlock);
-        HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-            _stats.n_packets = 0;
-            _stats.n_bytes = 0;
-            ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
-            if (!ret) {
-                stats->n_packets += _stats.n_packets;
-                stats->n_bytes += _stats.n_bytes;
-            }
-        }
-        ovs_rwlock_unlock(&aux->rwlock);
-        netdev_close(tnl_dev);
-        return 0;
-    }
-    netdev_close(tnl_dev);
-    return -1;
-}
-
-static int
-try_tnlflow_stats(struct dp_netdev_flow *flow, \
-                  struct netdev *inport, \
-                  long long now, \
-                  struct dpif_flow_stats *stats)
-{
-    bool is_tnlflow = try_tnlflow(flow, inport);
-    if (!is_tnlflow)
-        return -1;
-
-    bool found;
-    struct netdev_vport *vport = netdev_vport_cast(inport);
-    struct tnl_offload_aux *aux = vport->offload_aux;
-    struct tnl_pop_flow *tnlflow = \
-                        tnlflow_find(flow, aux, &found);
-    if (found) {
-        struct dpif_flow_stats _stats;
-        _stats.used = now / 1000; 
-        int ret;
-        struct ingress_flow *inflow;
-        memset(stats, 0, sizeof(*stats));
-
-        ovs_rwlock_rdlock(&aux->rwlock);
-        HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
-            _stats.n_bytes = 0;
-            _stats.n_packets = 0;
-            ret = tnl_pop_flow_op_stat(inflow, tnlflow, &_stats);
-            if (!ret) {
-                stats->n_packets += _stats.n_packets;
-                stats->n_bytes += _stats.n_bytes;
-            }
-        }
-        ovs_rwlock_unlock(&aux->rwlock);
-        return 0;
-    }
-    return -1;
-}
-
-static int
-dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow,
-                         struct dp_netdev_pmd_thread *pmd)
-{
-    int ret;
-    struct netdev *port;
-    struct dpif_flow_stats stats = {0};
-
-    odp_port_t in_port = netdev_flow->flow.in_port.odp_port;
-
-    port = netdev_ports_get(in_port, pmd->dp->class);
-    if (!port) {
-        return -1;
-    }
-    /* get offloaded stats */
-    ret = try_ingress_stats(netdev_flow, \
-                        dp_netdev_flow_get_actions(netdev_flow),\
-                        pmd->dp, \
-                        pmd->ctx.now, \
-                        &stats);
-    if (!ret) {
-        goto exit;
-    }
-
-    ret = try_tnlflow_stats(netdev_flow, \
-                            port, \
-                            pmd->ctx.now,\
-                            &stats);
-    if (!ret) {
-        goto exit;
-    }
-
-    ret = netdev_flow_stats_get(port, &netdev_flow->mega_ufid, &stats);
-exit:
-    netdev_close(port);
-    if (ret) {
-        return -1;
-    }
-
-    if (stats.n_packets) {
-        atomic_store_relaxed(&netdev_flow->stats.used, pmd->ctx.now / 1000);
-        non_atomic_ullong_add(&netdev_flow->stats.packet_count, stats.n_packets);
-        non_atomic_ullong_add(&netdev_flow->stats.byte_count, stats.n_bytes);
-    }
-
-    return 0;
-}
-
-static int
 dpif_netdev_flow_dump_next(struct dpif_flow_dump_thread *thread_,
                            struct dpif_flow *flows, int max_flows)
 {
@@ -4418,7 +3095,7 @@ dpif_netdev_flow_dump_next(struct dpif_flow_dump_thread *thread_,
                                                      node);
                 /* Read hardware stats in case of hardware offload */
                 if (dp_netdev_flow_offload(netdev_flows[n_flows])) {
-                    dpif_netdev_offload_used(netdev_flows[n_flows], pmd);
+                    dpif_netdev_offload_used(netdev_flows[n_flows], pmd->dp->class, pmd->ctx.now);
                 }
             }
             /* When finishing dumping the current pmd thread, moves to
@@ -4887,7 +3564,7 @@ dp_netdev_flow_get_actions(const struct dp_netdev_flow *flow)
     return ovsrcu_get(struct dp_netdev_actions *, &flow->actions);
 }
 
-static void
+void
 dp_netdev_actions_free(struct dp_netdev_actions *actions)
 {
     free(actions);
@@ -5443,7 +4120,7 @@ flush_offload_flows(struct dp_netdev_pmd_thread *pmd)
 
     CMAP_FOR_EACH(flow, node, &pmd->flow_table) {
         if (dp_netdev_flow_offload(flow)) {
-            queue_netdev_flow_del(dp, flow);
+            queue_netdev_flow_del(&dp->dp_flow_offload, dp->class, flow);
         }
     }
     dp_netdev_wait_offload_done(&pmd->dp->dp_flow_offload);

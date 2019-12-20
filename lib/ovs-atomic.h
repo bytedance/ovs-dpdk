@@ -662,4 +662,19 @@ ovs_refcount_unref_relaxed(struct ovs_refcount *refcount)
     return old_refcount;
 }
 
+/* Add 'n' to the atomic variable 'var' non-atomically and using relaxed
+ * load/store semantics.  While the increment is not atomic, the load and
+ * store operations are, making it impossible to read inconsistent values.
+ *
+ * This is used to update thread local stats counters. */
+static inline void
+non_atomic_ullong_add(atomic_ullong *var, unsigned long long n)
+{
+    unsigned long long tmp;
+
+    atomic_read_relaxed(var, &tmp);
+    tmp += n;
+    atomic_store_relaxed(var, tmp);
+}
+
 #endif /* ovs-atomic.h */
