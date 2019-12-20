@@ -622,7 +622,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
 
     /* if it's add, find will fail, new one.
      * if it's mod, find might also fail, this is because
-     * the previous insertion might fail, so find will only fail
+     * the previous insertion might fail.
      * let's try to insert anyway.
      */
     tnlflow = tnlflow_find(flow, aux, &found);
@@ -685,7 +685,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     odp_port_t portno = nl_attr_get_odp_port(tnl_pop);
     struct netdev *tnl_dev = netdev_ports_get(portno, info->dpif_class);
     if (!tnl_dev) {
-        return OFFLOAD_FAILED;
+        return OFFLOAD_NONE;
     }
     struct netdev_vport *vport = netdev_vport_cast(tnl_dev);
     struct tnl_offload_aux *aux = vport->offload_aux;
@@ -695,22 +695,17 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
     /* multiple pmd thread has the same flow in
      * pmd thread flow table
      */
-    enum offload_status status;
-    if (found) {
-        status = try_offload_tnl_pop(inflow, aux, info);
+    if (!found) {
+        inflow = ingress_flow_new(flow, inport);
+        ingress_flow_insert(aux, inflow);
+    } else {
         netdev_close(tnl_dev);
-        goto exit;
+        return OFFLOAD_FULL;
     }
 
-    inflow = ingress_flow_new(flow, inport);
-    ingress_flow_insert(aux, inflow);
-    status = try_offload_tnl_pop(inflow, aux, info);
+    try_offload_tnl_pop(inflow, aux, info);
     netdev_close(tnl_dev);
-exit:
-    if (status == OFFLOAD_FAILED)
-        return OFFLOAD_PARTIAL;
-    else
-        return OFFLOAD_FULL;
+    return OFFLOAD_FULL;
 }
 
 static char *get_act_str(struct ds *ds, struct dp_netdev_actions *act)
@@ -875,10 +870,17 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
      * @NOTE: if it's mod, always return OFFLOAD_NONE, to make sure
      * not ref dp_netdev_flow.
      */
-    if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD && \
-            !offload_check_action(offload->dp_act, dpif_class)) {
+    if (!offload_check_action(offload->dp_act, dpif_class)) {
         netdev_close(netdev);
-        return -1;
+        if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD || \
+                    flow->status == OFFLOAD_FAILED)
+            return -1;
+        else {
+            /* mod, we have to del it, since it mod to something hw
+             * not accept*/
+            offload->op = DP_NETDEV_FLOW_OFFLOAD_OP_DEL;
+            return dp_netdev_flow_offload_del(offload);
+        }
     }
 
     enum offload_status status;

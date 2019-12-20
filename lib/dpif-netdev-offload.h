@@ -17,7 +17,6 @@ enum offload_status {
     OFFLOAD_FAILED,  /* tried but failed, not need to try again */
     OFFLOAD_MASK,    /* mask offloaded */
     OFFLOAD_FULL,    /* full offloaded */ 
-    OFFLOAD_PARTIAL, /* ingress offload */
 };
 
 struct dp_netdev_flow;
@@ -65,8 +64,7 @@ static inline bool
 offload_status_offloaded(enum offload_status status)
 {
     return status == OFFLOAD_MASK || \
-                status == OFFLOAD_FULL || \
-                status == OFFLOAD_PARTIAL;
+                status == OFFLOAD_FULL;
 }
 
 void

@@ -229,6 +229,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
         info->actions_offloaded = 0;
         VLOG_ERR("%s: rte flow create error: %u : message : %s\n",
                  netdev_get_name(netdev), error.type, error.message);
+        netdev_offload_dump_match(match, ufid, nl_actions, actions_len, info);
         ret = -1;
         goto out;
     }
@@ -370,6 +371,7 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
      */
     fd = ufid_to_flow_data_find(netdev, ufid);
     if (fd) {
+        VLOG_INFO("offload flow exist, maybe mod, destroy first\n");
         ret = netdev_offload_dpdk_destroy_flow(netdev, ufid, fd);
         if (ret < 0) {
             return ret;
