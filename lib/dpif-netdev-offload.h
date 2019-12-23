@@ -38,7 +38,10 @@ struct ingress_flow {
 /* tnl pop flow */
 struct tnl_pop_flow {
     struct dp_netdev_flow *flow;
+    /* only used for rollback */
     enum offload_status status;
+    /* how many ingress rules associate with this rule */
+    int ref;
     struct hmap_node node;
 };
 

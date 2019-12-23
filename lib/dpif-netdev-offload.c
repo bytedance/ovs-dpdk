@@ -376,16 +376,17 @@ tnlflow_op_flush(struct tnl_pop_flow *tnlflow, \
     ovs_rwlock_unlock(&aux->rwlock);
 }
 
-static enum offload_status
+static int
 try_offload_tnl_pop(struct ingress_flow *inflow,\
                     struct tnl_offload_aux *aux,\
                     struct offload_info *info)
 {
     struct tnl_pop_flow *tnlflow;
     int ret;
+    int hint = 0;
     bool need_rollback = false;
 
-    ovs_rwlock_rdlock(&aux->rwlock);
+    ovs_rwlock_wrlock(&aux->rwlock);
     HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
         tnlflow->status = OFFLOAD_NONE;
     }
@@ -396,22 +397,38 @@ try_offload_tnl_pop(struct ingress_flow *inflow,\
                                     info);
         if (ret == -1) {
             need_rollback = true;
-            break;
+            tnlflow->status = OFFLOAD_FAILED;
         } else {
             tnlflow->status = OFFLOAD_FULL;
+            tnlflow->ref ++;
         }
     }
 
     if (need_rollback) {
-        HMAP_FOR_EACH(tnlflow, node, &aux->tnl_pop_flows) {
-            if (tnlflow->status == OFFLOAD_FULL) {
+        struct tnl_pop_flow *next;
+        HMAP_FOR_EACH_SAFE(tnlflow, next, node, &aux->tnl_pop_flows) {
+            if (tnlflow->status == OFFLOAD_FAILED) {
+                if (tnlflow->ref == 0) {
+                    atomic_store_explicit(&tnlflow->flow->status, OFFLOAD_FAILED,\
+                                            memory_order_release); 
+                    hmap_remove(&aux->tnl_pop_flows, &tnlflow->node);
+                    tnlflow_free(tnlflow);
+                } else {
+                    /* this is weird as this inflow insert failed,
+                     * however it is associated with another ingress-flow
+                     * which means that it has been successfully put before.
+                     */
+                    VLOG_ERR("inflow merges tnlflow failed, but ref != 0\n");
+                    hint = -1;
+                }
+            } else {
                 tnl_pop_flow_op_del(inflow, tnlflow);
             }
         }
     }
     ovs_rwlock_unlock(&aux->rwlock);
 
-    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
+    return hint;
 }
 
 static struct tnl_pop_flow*
@@ -644,6 +661,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
             need_rollback = true;
             break;
         } else {
+            tnlflow->ref ++;
             inflow->status = OFFLOAD_FULL;
         }
     }
@@ -651,6 +669,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     if (need_rollback) {
         HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
             if (inflow->status == OFFLOAD_FULL) {
+                tnlflow->ref --;
                 tnl_pop_flow_op_del(inflow, tnlflow);
             }
         }
@@ -671,6 +690,26 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
         tnlflow_del(tnlflow, aux);
     }
     return OFFLOAD_NONE;
+}
+
+static bool
+ingress_flow_validate(struct ingress_flow *inflow, \
+                        struct offload_info *info)
+{
+    struct match m;
+    miniflow_expand(&inflow->flow->cr.flow.mf, &m.flow);
+    miniflow_expand(&inflow->flow->cr.mask->mf, &m.wc.masks);
+    memset(&m.tun_md, 0, sizeof m.tun_md);
+
+    info->need_mark = 1;
+    int ret = netdev_flow_put(inflow->ingress_netdev, &m,
+            NULL, 0, &inflow->flow->mega_ufid, info,
+            NULL);
+    info->need_mark = 0;
+    if(ret)
+        return false;
+    netdev_flow_del(inflow->ingress_netdev, &inflow->flow->mega_ufid, NULL);
+    return true;
 }
 
 static enum offload_status
@@ -701,13 +740,25 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
      */
     if (!found) {
         inflow = ingress_flow_new(flow, inport);
-        ingress_flow_insert(aux, inflow);
+        bool valid;
+        valid = ingress_flow_validate(inflow, info);
+        if (!valid) {
+            ingress_flow_free(inflow);
+            netdev_close(tnl_dev);
+            return OFFLOAD_FAILED;
+        }
     } else {
         netdev_close(tnl_dev);
         return OFFLOAD_FULL;
     }
 
-    try_offload_tnl_pop(inflow, aux, info);
+    int ret = try_offload_tnl_pop(inflow, aux, info);
+    if (ret) {
+        ingress_flow_free(inflow);
+        netdev_close(tnl_dev);
+        return OFFLOAD_FAILED;
+    }
+    ingress_flow_insert(aux, inflow);
     netdev_close(tnl_dev);
     return OFFLOAD_FULL;
 }

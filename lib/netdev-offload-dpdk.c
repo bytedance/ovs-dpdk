@@ -204,21 +204,17 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
         goto out;
     }
 
-    info->actions_offloaded = !netdev_dpdk_flow_actions_add(&actions,
-                                                            nl_actions,
-                                                            actions_len, info);
-    if (!info->actions_offloaded) {
+    if (info->need_mark) {
         /* if we failed to offload the rule actions fallback to mark rss
          * actions.
          */
-#if 0 /* currently we do not use mark offload */
-        netdev_dpdk_flow_actions_free(&actions);
+        flow_attr.transfer = 0;
         netdev_dpdk_flow_actions_add_mark_rss(&actions, netdev,
                                               info->flow_mark);
-        flow_attr.transfer = 0;
-#endif
-        ret = -1;
-        goto out;
+    } else {
+        info->actions_offloaded = !netdev_dpdk_flow_actions_add(&actions,
+                                                                nl_actions,
+                                                                actions_len, info);
     }
 
     flow = netdev_dpdk_rte_flow_create(netdev, &flow_attr,
