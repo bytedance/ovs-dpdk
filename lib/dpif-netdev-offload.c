@@ -1171,7 +1171,7 @@ try_tnlflow_stats(struct dp_netdev_flow *flow, \
 int
 dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow, \
                          const struct dpif_class const *dpif_class, \
-                         unsigned now)
+                         long long now)
 {
     int ret;
     struct netdev *port;

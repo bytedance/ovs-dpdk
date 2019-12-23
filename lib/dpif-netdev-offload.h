@@ -92,7 +92,7 @@ queue_netdev_flow_put(struct dp_flow_offload *dp_flow_offload,\
 int
 dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow, \
                          const struct dpif_class const *dpif_class, \
-                         unsigned now);
+                         long long now);
 #ifdef  __cplusplus
 }
 #endif
