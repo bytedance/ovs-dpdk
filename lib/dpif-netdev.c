@@ -2290,7 +2290,7 @@ emc_insert(struct emc_cache *cache, const struct netdev_flow_key *key,
     emc_change_entry(to_be_replaced, flow, key);
 }
 
-static inline void
+static inline bool
 emc_probabilistic_insert(struct dp_netdev_pmd_thread *pmd,
                          const struct netdev_flow_key *key,
                          struct dp_netdev_flow *flow)
@@ -2303,7 +2303,9 @@ emc_probabilistic_insert(struct dp_netdev_pmd_thread *pmd,
 
     if (min && random_uint32() <= min) {
         emc_insert(&(pmd->flow_cache).emc_cache, key, flow);
+        return true;
     }
+    return false;
 }
 
 static inline struct dp_netdev_flow *
@@ -2710,10 +2712,6 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
 
     cmap_insert(&pmd->flow_table, CONST_CAST(struct cmap_node *, &flow->node),
                 dp_netdev_flow_hash(&flow->ufid));
-
-    queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
-                            pmd->dp->class, \
-                flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
 
     if (OVS_UNLIKELY(!VLOG_DROP_DBG((&upcall_rl)))) {
         struct ds ds = DS_EMPTY_INITIALIZER;
@@ -5894,7 +5892,15 @@ smc_lookup_batch(struct dp_netdev_pmd_thread *pmd,
                     /* SMC hit and emc miss, we insert into EMC */
                     keys[i].len =
                         netdev_flow_key_size(miniflow_n_values(&keys[i].mf));
-                    emc_probabilistic_insert(pmd, &keys[i], flow);
+                    if (emc_probabilistic_insert(pmd, &keys[i], flow)) {
+                        if (flow->status == OFFLOAD_NONE) {
+                            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                                    pmd->dp->class, \
+                                    flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+                            atomic_store_explicit(&flow->status, OFFLOAD_IN_PROGRESS, \
+                                                memory_order_release);
+                        }
+                    }
                     /* Add these packets into the flow map in the same order
                      * as received.
                      */
@@ -6110,7 +6116,11 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
         ovs_mutex_unlock(&pmd->flow_mutex);
         uint32_t hash = dp_netdev_flow_hash(&netdev_flow->ufid);
         smc_insert(pmd, key, hash);
-        emc_probabilistic_insert(pmd, key, netdev_flow);
+        if (emc_probabilistic_insert(pmd, key, netdev_flow)) {
+            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                    pmd->dp->class, \
+                    netdev_flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+        }
     }
     if (pmd_perf_metrics_enabled(pmd)) {
         /* Update upcall stats. */
@@ -6220,7 +6230,15 @@ fast_path_processing(struct dp_netdev_pmd_thread *pmd,
         uint32_t hash =  dp_netdev_flow_hash(&flow->ufid);
         smc_insert(pmd, keys[i], hash);
 
-        emc_probabilistic_insert(pmd, keys[i], flow);
+        if (emc_probabilistic_insert(pmd, keys[i], flow)) {
+            if (flow->status == OFFLOAD_NONE) {
+                queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                        pmd->dp->class, \
+                        flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+                atomic_store_explicit(&flow->status, OFFLOAD_IN_PROGRESS, \
+                        memory_order_release);
+            }
+        }
         /* Add these packets into the flow map in the same order
          * as received.
          */

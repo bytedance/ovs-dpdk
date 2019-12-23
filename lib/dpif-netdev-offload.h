@@ -13,10 +13,11 @@ extern "C" {
 #endif
 
 enum offload_status {
-    OFFLOAD_NONE,    /* not tried */
-    OFFLOAD_FAILED,  /* tried but failed, not need to try again */
-    OFFLOAD_MASK,    /* mask offloaded */
-    OFFLOAD_FULL,    /* full offloaded */ 
+    OFFLOAD_NONE,            /* not tried */
+    OFFLOAD_FAILED,          /* tried but failed, not need to try again */
+    OFFLOAD_MASK,            /* mask offloaded */
+    OFFLOAD_FULL,            /* full offloaded */
+    OFFLOAD_IN_PROGRESS,     /* flow has been put in offload queue */
 };
 
 struct dp_netdev_flow;
