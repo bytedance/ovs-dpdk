@@ -925,22 +925,25 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
      * @NOTE: if it's mod, always return OFFLOAD_NONE, to make sure
      * not ref dp_netdev_flow.
      */
+    int ret = 0;
     if (!offload_check_action(offload->dp_act, dpif_class)) {
         netdev_close(netdev);
         if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD || \
-                    flow->status == OFFLOAD_FAILED)
+                    flow->status == OFFLOAD_FAILED) {
+            atomic_store_explicit(&flow->status, OFFLOAD_FAILED, memory_order_release);
             return -1;
-        else {
+        } else {
             /* mod, we have to del it, since it mod to something hw
              * not accept*/
             offload->op = DP_NETDEV_FLOW_OFFLOAD_OP_DEL;
-            return dp_netdev_flow_offload_del(offload);
+            ret = dp_netdev_flow_offload_del(offload);
+            atomic_store_explicit(&flow->status, OFFLOAD_FAILED, memory_order_release);
+            return ret;
         }
     }
 
     enum offload_status status;
     status = dp_netdev_try_offload_ingress(flow, dpif_class, netdev, offload, &info);
-    int ret = 0;
     if (status != OFFLOAD_NONE) {
         atomic_store_explicit(&flow->status, status, memory_order_release);
         goto exit;
