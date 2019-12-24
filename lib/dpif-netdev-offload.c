@@ -28,7 +28,8 @@ dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload)
     ovs_mutex_init(&dp_flow_offload->mutex);
     ovs_list_init(&dp_flow_offload->list);
     xpthread_cond_init(&dp_flow_offload->cond, NULL);
-    dp_flow_offload->exit =  false;
+    dp_flow_offload->exit = false;
+    dp_flow_offload->req = false;
     dp_flow_offload->thread = \
         ovs_thread_create("hw_offload",
                           dp_netdev_flow_offload_main, dp_flow_offload);
@@ -67,6 +68,15 @@ dp_netdev_join_offload_thread(struct dp_flow_offload *offload)
     xpthread_cond_signal(&offload->cond);
     ovs_mutex_unlock(&offload->mutex);
     xpthread_join(offload->thread, NULL);
+}
+
+void
+dp_netdev_offload_restart(struct dp_flow_offload *offload)
+{
+    offload->exit = false;
+    offload->thread = \
+        ovs_thread_create("hw_offload",
+                          dp_netdev_flow_offload_main, offload);
 }
 
 struct tnl_offload_aux *
@@ -992,31 +1002,32 @@ dp_netdev_flow_offload_main(void *data)
     struct ovs_list *list;
     const char *op;
     int ret;
-    bool exit = false;
+    bool exit;
 
     for (;;) {
         ovs_mutex_lock(&dp_flow_offload->mutex);
-        if (ovs_list_is_empty(&dp_flow_offload->list)) {
-again:
+check_again:
+        atomic_read_explicit(&dp_flow_offload->exit, \
+                             &exit, \
+                             memory_order_acquire);
+        if (exit) {
+            ovs_mutex_unlock(&dp_flow_offload->mutex);
+            break;
+        }
+
+        if (!ovs_list_is_empty(&dp_flow_offload->list)) {
+            list = ovs_list_pop_front(&dp_flow_offload->list);
+            offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
+        } else {
             dp_flow_offload->process = false;
             ovsrcu_quiesce_start();
             ovs_mutex_cond_wait(&dp_flow_offload->cond,
                                 &dp_flow_offload->mutex);
-            dp_flow_offload->process = true;
             ovsrcu_quiesce_end();
+            goto check_again;
         }
 
-        atomic_read_explicit(&dp_flow_offload->exit, &exit, memory_order_acquire);
-        if (!ovs_list_is_empty(&dp_flow_offload->list)) {
-            list = ovs_list_pop_front(&dp_flow_offload->list);
-            offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
-        } else if (exit) {
-            ovs_mutex_unlock(&dp_flow_offload->mutex);
-            break;
-        } else {
-            goto again;
-        }
-
+        dp_flow_offload->process = true;
         ovs_mutex_unlock(&dp_flow_offload->mutex);
 
         /*  get actions here, act will not be freed as 
@@ -1083,7 +1094,7 @@ queue_netdev_flow_put(struct dp_flow_offload *dp_flow_offload,\
         return;
     }
 
-    if (dp_flow_offload->exit) {
+    if (!dp_flow_offload->req) {
         return;
     }
 

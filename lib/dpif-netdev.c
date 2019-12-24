@@ -726,6 +726,8 @@ static void smc_clear_entry(struct smc_bucket *b, int idx);
 static void dp_netdev_request_reconfigure(struct dp_netdev *dp);
 static inline bool
 pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd);
+static void
+flush_offload_flows(struct dp_netdev_pmd_thread *pmd);
 
 static void
 emc_cache_init(struct emc_cache *flow_cache)
@@ -3379,6 +3381,23 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
         pmd_alb->rebalance_intvl = rebalance_intvl;
     }
 
+
+    if (dp->dp_flow_offload.exit == false && \
+            !smap_get_bool(other_config, "hw-offload", false)) {
+        atomic_store_explicit(&dp->dp_flow_offload.req, false,
+                              memory_order_seq_cst);
+        struct dp_netdev_pmd_thread *pmd;
+        CMAP_FOR_EACH(pmd, node, &dp->poll_threads) {
+            flush_offload_flows(pmd);
+        }
+        dp_netdev_join_offload_thread(&dp->dp_flow_offload);
+    } else if (dp->dp_flow_offload.exit == true && \
+            smap_get_bool(other_config, "hw-offload", false)) {
+        dp_netdev_offload_restart(&dp->dp_flow_offload);
+        atomic_store_explicit(&dp->dp_flow_offload.req, true,
+                               memory_order_release);
+    }
+
     set_pmd_auto_lb(dp);
     return 0;
 }
@@ -4793,6 +4812,7 @@ dpif_netdev_run(struct dpif *dpif)
         dp->last_tnl_conf_seq = new_tnl_seq;
         return true;
     }
+
     return false;
 }
 

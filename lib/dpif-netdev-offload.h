@@ -52,6 +52,7 @@ struct dp_flow_offload {
     pthread_cond_t cond;
     pthread_t thread;
     bool exit;
+    bool req;
     bool process;
 };
 
@@ -94,6 +95,8 @@ int
 dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow, \
                          const struct dpif_class const *dpif_class, \
                          long long now);
+void
+dp_netdev_offload_restart(struct dp_flow_offload *offload);
 #ifdef  __cplusplus
 }
 #endif
