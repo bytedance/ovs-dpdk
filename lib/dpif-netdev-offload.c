@@ -29,7 +29,7 @@ dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload)
     ovs_list_init(&dp_flow_offload->list);
     xpthread_cond_init(&dp_flow_offload->cond, NULL);
     dp_flow_offload->exit = false;
-    dp_flow_offload->req = false;
+    dp_flow_offload->req = true;
     dp_flow_offload->thread = \
         ovs_thread_create("hw_offload",
                           dp_netdev_flow_offload_main, dp_flow_offload);

@@ -728,6 +728,8 @@ static inline bool
 pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd);
 static void
 flush_offload_flows(struct dp_netdev_pmd_thread *pmd);
+static void
+try_offload_flows(struct dp_netdev_pmd_thread *pmd);
 
 static void
 emc_cache_init(struct emc_cache *flow_cache)
@@ -1149,6 +1151,72 @@ dpif_netdev_pmd_rebalance(struct unixctl_conn *conn, int argc,
 }
 
 static void
+dpif_netdev_try_hw_flows(struct unixctl_conn *conn, int argc,
+                         const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ds reply = DS_EMPTY_INITIALIZER;
+    struct dp_netdev *dp = NULL;
+
+    ovs_mutex_lock(&dp_netdev_mutex);
+
+    if (argc == 2) {
+        dp = shash_find_data(&dp_netdevs, argv[1]);
+    } else if (shash_count(&dp_netdevs) == 1) {
+        /* There's only one datapath */
+        dp = shash_first(&dp_netdevs)->data;
+    }
+
+    if (!dp) {
+        ovs_mutex_unlock(&dp_netdev_mutex);
+        unixctl_command_reply_error(conn,
+                                    "please specify an existing datapath");
+        return;
+    }
+
+    struct dp_netdev_pmd_thread *pmd;
+    CMAP_FOR_EACH(pmd, node, &dp->poll_threads) {
+        try_offload_flows(pmd);
+    }
+    ovs_mutex_unlock(&dp_netdev_mutex);
+    ds_put_cstr(&reply, "tried to offload to HW.\n");
+    unixctl_command_reply(conn, ds_cstr(&reply));
+    ds_destroy(&reply);
+}
+
+static void
+dpif_netdev_flush_hw_flows(struct unixctl_conn *conn, int argc,
+                           const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ds reply = DS_EMPTY_INITIALIZER;
+    struct dp_netdev *dp = NULL;
+
+    ovs_mutex_lock(&dp_netdev_mutex);
+
+    if (argc == 2) {
+        dp = shash_find_data(&dp_netdevs, argv[1]);
+    } else if (shash_count(&dp_netdevs) == 1) {
+        /* There's only one datapath */
+        dp = shash_first(&dp_netdevs)->data;
+    }
+
+    if (!dp) {
+        ovs_mutex_unlock(&dp_netdev_mutex);
+        unixctl_command_reply_error(conn,
+                                    "please specify an existing datapath");
+        return;
+    }
+
+    struct dp_netdev_pmd_thread *pmd;
+    CMAP_FOR_EACH(pmd, node, &dp->poll_threads) {
+        flush_offload_flows(pmd);
+    }
+    ovs_mutex_unlock(&dp_netdev_mutex);
+    ds_put_cstr(&reply, "flushed HW offload flows.\n");
+    unixctl_command_reply(conn, ds_cstr(&reply));
+    ds_destroy(&reply);
+}
+
+static void
 dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
                      void *aux)
 {
@@ -1256,7 +1324,7 @@ pmd_perf_show_cmd(struct unixctl_conn *conn, int argc,
     par.command_type = PMD_INFO_PERF_SHOW;
     dpif_netdev_pmd_info(conn, argc, argv, &par);
 }
-
+
 static int
 dpif_netdev_init(void)
 {
@@ -1286,6 +1354,13 @@ dpif_netdev_init(void)
                              "on|off [-b before] [-a after] [-e|-ne] "
                              "[-us usec] [-q qlen]",
                              0, 10, pmd_perf_log_set_cmd,
+                             NULL);
+
+    unixctl_command_register("dpif-netdev/try-hw-flows", "[dp]",
+                             0, 1, dpif_netdev_try_hw_flows,
+                             NULL);
+    unixctl_command_register("dpif-netdev/flush-hw-flows", "[dp]",
+                             0, 1, dpif_netdev_flush_hw_flows,
                              NULL);
     return 0;
 }
@@ -4140,7 +4215,37 @@ flush_offload_flows(struct dp_netdev_pmd_thread *pmd)
             queue_netdev_flow_del(&dp->dp_flow_offload, dp->class, flow);
         }
     }
-    dp_netdev_wait_offload_done(&pmd->dp->dp_flow_offload);
+    dp_netdev_wait_offload_done(&dp->dp_flow_offload);
+}
+
+static void
+try_offload_flows(struct dp_netdev_pmd_thread *pmd)
+{
+    struct dp_netdev *dp = pmd->dp;
+    struct dp_netdev_flow *flow;
+    enum offload_status status;
+
+    CMAP_FOR_EACH(flow, node, &pmd->flow_table) {
+        atomic_read_explicit(&flow->status, \
+                             &status, \
+                             memory_order_acquire);
+
+        if (status == OFFLOAD_FAILED || \
+                status == OFFLOAD_NONE ) {
+
+            if (status == OFFLOAD_FAILED) {
+                atomic_store_explicit(&flow->status, \
+                        OFFLOAD_NONE, \
+                        memory_order_seq_cst);
+            }
+
+            queue_netdev_flow_put(&dp->dp_flow_offload, \
+                    dp->class, \
+                    flow, NULL, \
+                    DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+        }
+    }
+    dp_netdev_wait_offload_done(&dp->dp_flow_offload);
 }
 
 static void
