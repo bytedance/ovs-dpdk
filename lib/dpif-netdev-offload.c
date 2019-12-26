@@ -512,7 +512,8 @@ del_ingress(struct dp_netdev_flow *flow,\
     bool found;
     struct ingress_flow *inflow = ingress_flow_find(flow, aux, &found);
     /* del all tnl_pop flows */
-    if (found) {
+    /* there could be multiple flow from different PMDs */
+    if (found && inflow->flow == flow) {
         ingress_flow_op_flush(inflow, aux);
         atomic_store_explicit(&inflow->flow->status, OFFLOAD_NONE, \
                         memory_order_release);
@@ -574,7 +575,7 @@ try_del_tnlflow(struct dp_netdev_flow *flow, \
     struct netdev_vport * vport = netdev_vport_cast(inport);
     struct tnl_offload_aux * aux = vport->offload_aux;
     tnlflow = tnlflow_find(flow, aux, &found);
-    if (found) {
+    if (found && tnlflow->flow == flow) {
        tnlflow_op_flush(tnlflow, aux); 
        atomic_store_explicit(&tnlflow->flow->status, OFFLOAD_NONE, \
                             memory_order_release);
@@ -659,6 +660,12 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     tnlflow = tnlflow_find(flow, aux, &found);
     if (!found)
         tnlflow = tnlflow_new(flow);
+    else if (tnlflow->flow != flow) {
+        /* if exist, check if the flow is coming from
+         * a different PMDs
+         */
+        return OFFLOAD_FULL;
+    }
 
     ovs_rwlock_rdlock(&aux->rwlock);
     HMAP_FOR_EACH(inflow, node, &aux->ingress_flows) {
