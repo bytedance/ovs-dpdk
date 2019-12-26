@@ -367,7 +367,7 @@ struct dp_netdev {
 
     struct conntrack *conntrack;
     struct pmd_auto_lb pmd_alb;
-    struct dp_flow_offload dp_flow_offload;
+    struct dp_flow_offload *dp_flow_offload;
 };
 
 static void meter_lock(const struct dp_netdev *dp, uint32_t meter_id)
@@ -1515,7 +1515,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     ovs_mutex_init_recursive(&dp->non_pmd_mutex);
     ovsthread_key_create(&dp->per_pmd_key, NULL);
 
-    dp_netdev_offload_init(&dp->dp_flow_offload);
+    dp->dp_flow_offload = dp_netdev_offload_new();
     ovs_mutex_lock(&dp->port_mutex);
     /* non-PMD will be created before all other threads and will
      * allocate static_tx_qid = 0. */
@@ -1611,7 +1611,7 @@ dp_netdev_free(struct dp_netdev *dp)
     ovs_mutex_unlock(&dp->port_mutex);
 
     dp_netdev_destroy_all_pmds(dp, true);
-    dp_netdev_join_offload_thread(&dp->dp_flow_offload);
+    dp_netdev_join_offload_thread(dp->dp_flow_offload);
     cmap_destroy(&dp->poll_threads);
 
     ovs_mutex_destroy(&dp->tx_qid_pool_mutex);
@@ -2078,7 +2078,7 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     dpcls_remove(cls, &flow->cr);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
     if (dp_netdev_flow_offload(flow)) {
-        queue_netdev_flow_del(&pmd->dp->dp_flow_offload, pmd->dp->class, flow);
+        queue_netdev_flow_del(pmd->dp->dp_flow_offload, pmd->dp->class, flow);
     }
     flow->dead = true;
 
@@ -2877,7 +2877,7 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
-            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+            queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
                                     pmd->dp->class, \
                                     netdev_flow, old_actions, \
                                         DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
@@ -3457,19 +3457,19 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     }
 
 
-    if (dp->dp_flow_offload.exit == false && \
+    if (dp->dp_flow_offload->exit == false && \
             !smap_get_bool(other_config, "hw-offload", false)) {
-        atomic_store_explicit(&dp->dp_flow_offload.req, false,
+        atomic_store_explicit(&dp->dp_flow_offload->req, false,
                               memory_order_seq_cst);
         struct dp_netdev_pmd_thread *pmd;
         CMAP_FOR_EACH(pmd, node, &dp->poll_threads) {
             flush_offload_flows(pmd);
         }
-        dp_netdev_join_offload_thread(&dp->dp_flow_offload);
-    } else if (dp->dp_flow_offload.exit == true && \
+        dp_netdev_join_offload_thread(dp->dp_flow_offload);
+    } else if (dp->dp_flow_offload->exit == true && \
             smap_get_bool(other_config, "hw-offload", false)) {
-        dp_netdev_offload_restart(&dp->dp_flow_offload);
-        atomic_store_explicit(&dp->dp_flow_offload.req, true,
+        dp_netdev_offload_restart(dp->dp_flow_offload);
+        atomic_store_explicit(&dp->dp_flow_offload->req, true,
                                memory_order_release);
     }
 
@@ -4212,10 +4212,10 @@ flush_offload_flows(struct dp_netdev_pmd_thread *pmd)
 
     CMAP_FOR_EACH(flow, node, &pmd->flow_table) {
         if (dp_netdev_flow_offload(flow)) {
-            queue_netdev_flow_del(&dp->dp_flow_offload, dp->class, flow);
+            queue_netdev_flow_del(dp->dp_flow_offload, dp->class, flow);
         }
     }
-    dp_netdev_wait_offload_done(&dp->dp_flow_offload);
+    dp_netdev_wait_offload_done(dp->dp_flow_offload);
 }
 
 static void
@@ -4231,7 +4231,7 @@ try_offload_flows(struct dp_netdev_pmd_thread *pmd)
                              memory_order_acquire);
 
         if (status == OFFLOAD_FAILED || \
-                status == OFFLOAD_NONE ) {
+                status == OFFLOAD_NONE) {
 
             if (status == OFFLOAD_FAILED) {
                 atomic_store_explicit(&flow->status, \
@@ -4239,13 +4239,13 @@ try_offload_flows(struct dp_netdev_pmd_thread *pmd)
                         memory_order_seq_cst);
             }
 
-            queue_netdev_flow_put(&dp->dp_flow_offload, \
+            queue_netdev_flow_put(dp->dp_flow_offload, \
                     dp->class, \
                     flow, NULL, \
                     DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
         }
     }
-    dp_netdev_wait_offload_done(&dp->dp_flow_offload);
+    dp_netdev_wait_offload_done(dp->dp_flow_offload);
 }
 
 static void
@@ -6019,11 +6019,9 @@ smc_lookup_batch(struct dp_netdev_pmd_thread *pmd,
                         netdev_flow_key_size(miniflow_n_values(&keys[i].mf));
                     if (emc_probabilistic_insert(pmd, &keys[i], flow)) {
                         if (flow->status == OFFLOAD_NONE) {
-                            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                            queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
                                     pmd->dp->class, \
                                     flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
-                            atomic_store_explicit(&flow->status, OFFLOAD_IN_PROGRESS, \
-                                                memory_order_release);
                         }
                     }
                     /* Add these packets into the flow map in the same order
@@ -6242,9 +6240,11 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
         uint32_t hash = dp_netdev_flow_hash(&netdev_flow->ufid);
         smc_insert(pmd, key, hash);
         if (emc_probabilistic_insert(pmd, key, netdev_flow)) {
-            queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
-                    pmd->dp->class, \
-                    netdev_flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+            if (netdev_flow->status == OFFLOAD_NONE) {
+                queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
+                        pmd->dp->class, \
+                        netdev_flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+            }
         }
     }
     if (pmd_perf_metrics_enabled(pmd)) {
@@ -6357,11 +6357,9 @@ fast_path_processing(struct dp_netdev_pmd_thread *pmd,
 
         if (emc_probabilistic_insert(pmd, keys[i], flow)) {
             if (flow->status == OFFLOAD_NONE) {
-                queue_netdev_flow_put(&pmd->dp->dp_flow_offload, \
+                queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
                         pmd->dp->class, \
                         flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
-                atomic_store_explicit(&flow->status, OFFLOAD_IN_PROGRESS, \
-                        memory_order_release);
             }
         }
         /* Add these packets into the flow map in the same order

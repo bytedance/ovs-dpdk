@@ -222,6 +222,25 @@ struct dp_netdev_flow {
     /* 'cr' must be the last member. */
 };
 
+static inline int
+flow_offload_status(struct dp_netdev_flow *flow)
+{
+    return flow->status & (OFFLOAD_IN_PROGRESS - 1);
+}
+
+static inline bool
+flow_offload_in_progress(struct dp_netdev_flow *flow)
+{
+    return flow->status & OFFLOAD_IN_PROGRESS;
+}
+
+static inline bool
+offload_status_offloaded(enum offload_status status)
+{
+    return status == OFFLOAD_MASK || \
+                status == OFFLOAD_FULL;
+}
+
 static inline bool
 dp_netdev_flow_offload(const struct dp_netdev_flow *flow)
 {
@@ -234,8 +253,6 @@ static inline uint32_t
 dp_netdev_flow_hash(const ovs_u128 *ufid) {
     return ufid->u32[0];
 }
-
-
 void dp_netdev_flow_unref(struct dp_netdev_flow *flow);
 bool dp_netdev_flow_ref(struct dp_netdev_flow *flow);
 

@@ -13,11 +13,11 @@ extern "C" {
 #endif
 
 enum offload_status {
-    OFFLOAD_NONE,            /* not tried */
-    OFFLOAD_FAILED,          /* tried but failed, not need to try again */
-    OFFLOAD_MASK,            /* mask offloaded */
-    OFFLOAD_FULL,            /* full offloaded */
-    OFFLOAD_IN_PROGRESS,     /* flow has been put in offload queue */
+    OFFLOAD_NONE,                /* not tried */
+    OFFLOAD_FAILED,              /* tried but failed, not need to try again */
+    OFFLOAD_MASK,                /* mask offloaded */
+    OFFLOAD_FULL,                /* full offloaded */
+    OFFLOAD_IN_PROGRESS = 0x80,  /* flow has been put in offload queue */
 };
 
 struct dp_netdev_flow;
@@ -65,15 +65,7 @@ struct dp_flow_offload_item {
     struct ovs_list node;
 };
 
-static inline bool
-offload_status_offloaded(enum offload_status status)
-{
-    return status == OFFLOAD_MASK || \
-                status == OFFLOAD_FULL;
-}
-
-void
-dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload);
+struct dp_flow_offload *dp_netdev_offload_new(void);
 void dp_netdev_wait_offload_done(struct dp_flow_offload *offload);
 void
 dp_netdev_join_offload_thread(struct dp_flow_offload *offload);

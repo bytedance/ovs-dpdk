@@ -22,17 +22,26 @@ VLOG_DEFINE_THIS_MODULE(dpif_netdev_offload);
 static void *
 dp_netdev_flow_offload_main(void *data);
 
-void
-dp_netdev_offload_init(struct dp_flow_offload *dp_flow_offload)
+static struct dp_flow_offload g_dp_flow_offload;
+static struct ovsthread_once offload_thread_once
+      = OVSTHREAD_ONCE_INITIALIZER;
+
+struct dp_flow_offload *
+dp_netdev_offload_new(void)
 {
-    ovs_mutex_init(&dp_flow_offload->mutex);
-    ovs_list_init(&dp_flow_offload->list);
-    xpthread_cond_init(&dp_flow_offload->cond, NULL);
-    dp_flow_offload->exit = false;
-    dp_flow_offload->req = true;
-    dp_flow_offload->thread = \
-        ovs_thread_create("hw_offload",
-                          dp_netdev_flow_offload_main, dp_flow_offload);
+    if (ovsthread_once_start(&offload_thread_once)) {
+        struct dp_flow_offload *dp_flow_offload = &g_dp_flow_offload;
+        ovs_mutex_init(&dp_flow_offload->mutex);
+        ovs_list_init(&dp_flow_offload->list);
+        xpthread_cond_init(&dp_flow_offload->cond, NULL);
+        dp_flow_offload->exit = false;
+        dp_flow_offload->req = true;
+        dp_flow_offload->thread = \
+                                  ovs_thread_create("hw_offload",
+                                          dp_netdev_flow_offload_main, dp_flow_offload);
+        ovsthread_once_done(&offload_thread_once);
+    }
+    return &g_dp_flow_offload;
 }
 
 void
@@ -140,14 +149,12 @@ dp_netdev_free_flow_offload(struct dp_flow_offload_item *offload)
 
 static void
 dp_netdev_append_flow_offload(struct dp_flow_offload *dp_flow_offload,
-                                struct dp_flow_offload_item *offload)
+                              struct dp_flow_offload_item *offload)
 {
-    ovs_mutex_lock(&dp_flow_offload->mutex);
     ovs_list_push_back(&dp_flow_offload->list, &offload->node);
     if (!dp_flow_offload->process) {
         xpthread_cond_signal(&dp_flow_offload->cond);
     }
-    ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
 
 static void
@@ -947,7 +954,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     if (!offload_check_action(offload->dp_act, dpif_class)) {
         netdev_close(netdev);
         if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD || \
-                    flow->status == OFFLOAD_FAILED) {
+                    flow_offload_status(flow) == OFFLOAD_FAILED) {
             atomic_store_explicit(&flow->status, OFFLOAD_FAILED, memory_order_release);
             return -1;
         } else {
@@ -1069,6 +1076,8 @@ check_again:
     for (;!ovs_list_is_empty(&dp_flow_offload->list);) {
         list = ovs_list_pop_front(&dp_flow_offload->list);
         offload = CONTAINER_OF(list, struct dp_flow_offload_item, node);
+        /* in case IN_PROGRESS flow coming here, change it to NONE */
+        atomic_store_explicit(&offload->flow->status, OFFLOAD_NONE, memory_order_release);
         dp_netdev_free_flow_offload(offload);
     }
     ovs_mutex_unlock(&dp_flow_offload->mutex);
@@ -1084,9 +1093,14 @@ queue_netdev_flow_del(struct dp_flow_offload *dp_flow_offload, \
 {
     struct dp_flow_offload_item *offload;
 
-    offload = dp_netdev_alloc_flow_offload(dpif_class, flow, NULL, 
-                                           DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
-    dp_netdev_append_flow_offload(dp_flow_offload, offload);
+    ovs_mutex_lock(&dp_flow_offload->mutex);
+    if (!flow_offload_in_progress(flow)) {
+        offload = dp_netdev_alloc_flow_offload(dpif_class, flow, NULL,
+                DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
+        flow->status |= OFFLOAD_IN_PROGRESS;
+        dp_netdev_append_flow_offload(dp_flow_offload, offload);
+    }
+    ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
 
 void
@@ -1106,8 +1120,13 @@ queue_netdev_flow_put(struct dp_flow_offload *dp_flow_offload,\
         return;
     }
 
-    offload = dp_netdev_alloc_flow_offload(dpif_class, flow, old_act, op);
-    dp_netdev_append_flow_offload(dp_flow_offload, offload);
+    ovs_mutex_lock(&dp_flow_offload->mutex);
+    if (!flow_offload_in_progress(flow)) {
+        offload = dp_netdev_alloc_flow_offload(dpif_class, flow, old_act, op);
+        flow->status |= OFFLOAD_IN_PROGRESS;
+        dp_netdev_append_flow_offload(dp_flow_offload, offload);
+    }
+    ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
 
 static int
