@@ -88,7 +88,7 @@ if [[ $mode != "switchdev" ]]; then
     done
     devlink dev eswitch set pci/$pci mode switchdev
     #wait for udev changes all the eth name
-    sleep 2
+    sleep 10
 fi
 
 
