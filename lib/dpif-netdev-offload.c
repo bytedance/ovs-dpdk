@@ -315,8 +315,8 @@ tnl_pop_flow_op_stat(struct ingress_flow *inflow, \
     int ret;
     ovs_u128 mega_ufid;
     tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-    ret = netdev_flow_stats_get(inflow->ingress_netdev, \
-                                &mega_ufid, stats);
+    ret = netdev_flow_get(inflow->ingress_netdev, NULL, NULL, \
+                          &mega_ufid, stats, NULL, NULL);
     return ret;
 }
 
@@ -917,6 +917,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     info.odp_support = &dp_netdev_support;
     const struct dpif_class *const dpif_class = offload->class;
     *CONST_CAST(const struct dpif_class **, &info.dpif_class) = dpif_class;
+    info.mod = (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
 
     if (flow->dead) {
         return -1;
@@ -1215,7 +1216,7 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow, \
         goto exit;
     }
 
-    ret = netdev_flow_stats_get(port, &netdev_flow->mega_ufid, &stats);
+    ret = netdev_flow_get(port, NULL, NULL, &netdev_flow->mega_ufid, &stats, NULL, NULL);
 exit:
     netdev_close(port);
     if (ret) {

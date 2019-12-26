@@ -81,7 +81,8 @@ struct offload_info {
     uint32_t flow_mark;
     uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
              need_decap:1,
-             need_mark:1;
+             need_mark:1,
+             mod:1;
 };
 
 int netdev_flow_flush(struct netdev *);
@@ -99,8 +100,6 @@ int netdev_flow_get(struct netdev *, struct match *, struct nlattr **actions,
                     struct dpif_flow_attrs *, struct ofpbuf *wbuffer);
 int netdev_flow_del(struct netdev *, const ovs_u128 *,
                     struct dpif_flow_stats *);
-int netdev_flow_stats_get(struct netdev *, const ovs_u128 *,
-                          struct dpif_flow_stats *);
 int netdev_init_flow_api(struct netdev *);
 void netdev_uninit_flow_api(struct netdev *);
 uint32_t netdev_get_block_id(struct netdev *);

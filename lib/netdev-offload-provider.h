@@ -82,13 +82,6 @@ struct netdev_flow_api {
     int (*flow_del)(struct netdev *, const ovs_u128 *ufid,
                     struct dpif_flow_stats *);
 
-    /* Get offloaded flow stats.
-     * Populate the 'stats' structure with the HW counters values for the
-     * specified ufid.
-     * Return 0 if successful, otherwise returns a positive errno value. */
-    int (*flow_stats_get)(struct netdev *netdev, const ovs_u128 *ufid,
-                          struct dpif_flow_stats *stats);
-
     /* Initializies the netdev flow api.
      * Return 0 if successful, otherwise returns a positive errno value. */
     int (*init_flow_api)(struct netdev *);

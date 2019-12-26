@@ -58,6 +58,7 @@ struct ufid_to_rte_flow_data {
     struct rte_flow *rte_flow;
     struct dpif_flow_stats stats;
     struct ovs_refcount refcnt;
+    struct ovs_spin spinlock;
 };
 
 static struct ufid_to_rte_flow_data * 
@@ -70,8 +71,7 @@ ufid_to_flow_data_find(struct netdev *netdev, const ovs_u128 *ufid)
 
     CMAP_FOR_EACH_WITH_HASH (data, node, hash, hw_flows) {
         if (ovs_u128_equals(*ufid, data->ufid)) {
-            if (ovs_refcount_try_ref_rcu(&data->refcnt))
-                return data;
+            return data;
         }
     }
     return NULL;
@@ -86,12 +86,6 @@ ufid_to_flow_data_insert(struct netdev *netdev, struct ufid_to_rte_flow_data *da
             CONST_CAST(struct cmap_node *, &data->node), hash);
 }
 
-static void
-ufid_to_flow_data_unref(struct ufid_to_rte_flow_data *fd)
-{
-    ovs_refcount_unref(&fd->refcnt);
-}
-
 static inline void
 ufid_to_flow_data_remove(struct netdev *netdev, struct ufid_to_rte_flow_data *data)
 {
@@ -99,7 +93,7 @@ ufid_to_flow_data_remove(struct netdev *netdev, struct ufid_to_rte_flow_data *da
     struct cmap *hw_flows = &netdev->hw_info.hw_flows;
     cmap_remove(hw_flows,
             CONST_CAST(struct cmap_node *, &data->node), hash);
-    ufid_to_flow_data_unref(data);
+    data->rte_flow = NULL;
 }
 
 /* Find rte_flow with @ufid. */
@@ -131,9 +125,16 @@ ufid_to_rte_flow_associate(struct netdev *netdev,
     data->ufid = *ufid;
     data->rte_flow = rte_flow;
     ovs_refcount_init(&data->refcnt);
-
+    ovs_spin_init(&data->spinlock);
 
     ufid_to_flow_data_insert(netdev, data);
+}
+
+static void
+ufid_to_flow_data_destroy(struct ufid_to_rte_flow_data *data)
+{
+    ovs_spin_destroy(&data->spinlock);
+    free(data);
 }
 
 static void
@@ -317,39 +318,28 @@ netdev_offload_dpdk_destroy_flow(struct netdev *netdev,
                                  const ovs_u128 *ufid,
                                  struct ufid_to_rte_flow_data *fd)
 {
-    ufid_to_flow_data_remove(netdev, fd);
-    int retry = 10;
-    int ret;
+    if (ovs_refcount_unref_relaxed(&fd->refcnt) == 1) {
+        ovs_spin_lock(&fd->spinlock);
+        struct rte_flow_error error;
+        int ret;
+        ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
 
-    while(!__sync_bool_compare_and_swap(&fd->refcnt.count, 1, 0) && (retry --) > 0) {
-        /* do nothig */
-        /* ovs_pause */
-        usleep(10);
-    }
+        if (ret == 0) {
+            VLOG_DBG("%s: removed rte flow %p associated with ufid " UUID_FMT "\n",
+                    netdev_get_name(netdev), fd->rte_flow,
+                    UUID_ARGS((struct uuid *)ufid));
+            ufid_to_flow_data_remove(netdev, fd);
+            ovs_spin_unlock(&fd->spinlock);
+            ovsrcu_postpone(ufid_to_flow_data_destroy, fd);
+            return 0;
+        }
 
-    if (retry == 0 && ovs_refcount_read(&fd->refcnt) != 0) {
-        ret = -1;
-        ufid_to_flow_data_insert(netdev, fd);
-        VLOG_ERR("%s: rte flow destroy error: fail to wait refcnt to 1\n",
-                 netdev_get_name(netdev));
+        ovs_refcount_init(&fd->refcnt);
+        ovs_spin_unlock(&fd->spinlock);
         return ret;
     }
 
-    struct rte_flow_error error;
-    ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
-
-    if (ret == 0) {
-        VLOG_DBG("%s: removed rte flow %p associated with ufid " UUID_FMT "\n",
-                 netdev_get_name(netdev), fd->rte_flow,
-                 UUID_ARGS((struct uuid *)ufid));
-        free(fd);
-    } else {
-        ovs_refcount_init(&fd->refcnt);
-        ufid_to_flow_data_insert(netdev, fd);
-        VLOG_ERR("%s: rte flow destroy error: %u : message : %s\n",
-                 netdev_get_name(netdev), error.type, error.message);
-    }
-    return ret;
+    return ovs_refcount_read(&fd->refcnt);
 }
 
 static int
@@ -367,10 +357,16 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
      */
     fd = ufid_to_flow_data_find(netdev, ufid);
     if (fd) {
-        VLOG_INFO("offload flow exist, maybe mod, destroy first\n");
-        ret = netdev_offload_dpdk_destroy_flow(netdev, ufid, fd);
-        if (ret < 0) {
-            return ret;
+        if (info->mod) {
+            ret = netdev_offload_dpdk_destroy_flow(netdev, ufid, fd);
+            /* ret > 0 means only del a ref of this flow
+             * ret < 0 means del fail of this flow
+             */
+            if (ret != 0)
+                return ret;
+        } else {
+            ovs_refcount_ref(&fd->refcnt);
+            return 0;
         }
     }
 
@@ -404,11 +400,10 @@ netdev_offload_dpdk_flow_flush(struct netdev *netdev)
 
     struct ufid_to_rte_flow_data *data;
     CMAP_FOR_EACH(data, node, &netdev->hw_info.hw_flows) {
+        ovs_spin_lock(&data->spinlock);
         ufid_to_flow_data_remove(netdev, data);
-        if (ovs_refcount_read(&data->refcnt) == 0)
-            free(data);
-        else
-            ovsrcu_postpone(free, data);
+        ovs_spin_unlock(&data->spinlock);
+        ovsrcu_postpone(ufid_to_flow_data_destroy, data);
     }
 
     ret = netdev_dpdk_rte_flow_flush(netdev, &error);
@@ -421,9 +416,13 @@ netdev_offload_dpdk_flow_flush(struct netdev *netdev)
 }
 
 static int
-netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
-                                   const ovs_u128 *ufid,
-                                   struct dpif_flow_stats *stats)
+netdev_offload_dpdk_flow_get(struct netdev *netdev,
+                             struct match *match OVS_UNUSED,
+                             struct nlattr **actions OVS_UNUSED,
+                             const ovs_u128 *ufid,
+                             struct dpif_flow_stats *stats,
+                             struct dpif_flow_attrs *attrs OVS_UNUSED,
+                             struct ofpbuf *buf OVS_UNUSED)
 {
     struct rte_flow_query_count query = { .reset = 1 };
     struct rte_flow_error error;
@@ -433,12 +432,20 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
     struct ufid_to_rte_flow_data *fd = ufid_to_flow_data_find(netdev, ufid);
     if (!fd)
         return -1;
-    rte_flow = fd->rte_flow;    
 
     if (stats->used && fd->stats.used && stats->used == fd->stats.used) {
         stats->n_packets += fd->stats.n_packets;
         stats->n_bytes += fd->stats.n_bytes;
-        ufid_to_flow_data_unref(fd);
+        return 0;
+    }
+
+    if (ovs_spin_trylock(&fd->spinlock)) {
+        return -1;
+    }
+
+    rte_flow = fd->rte_flow;
+    if (!fd->rte_flow) {
+        ovs_spin_unlock(&fd->spinlock);
         return 0;
     }
 
@@ -448,7 +455,7 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
                  " flow %p query for '%s' failed: %u, %s\n",
                  UUID_ARGS((struct uuid *)ufid), rte_flow,
                  netdev_get_name(netdev), error.type, error.message);
-        ufid_to_flow_data_unref(fd);
+        ovs_spin_unlock(&fd->spinlock);
         return -1;
     }
 
@@ -460,7 +467,7 @@ netdev_offload_dpdk_flow_stats_get(struct netdev *netdev,
         fd->stats.n_packets = (query.hits_set) ? query.hits : 0;
         fd->stats.n_bytes = (query.bytes_set) ? query.bytes : 0;
     }
-    ufid_to_flow_data_unref(fd);
+    ovs_spin_unlock(&fd->spinlock);
     return 0;
 }
 
@@ -475,6 +482,6 @@ const struct netdev_flow_api netdev_offload_dpdk = {
     .flow_flush = netdev_offload_dpdk_flow_flush,
     .flow_put = netdev_offload_dpdk_flow_put,
     .flow_del = netdev_offload_dpdk_flow_del,
-    .flow_stats_get = netdev_offload_dpdk_flow_stats_get,
+    .flow_get = netdev_offload_dpdk_flow_get,
     .init_flow_api = netdev_offload_dpdk_init_flow_api,
 };
