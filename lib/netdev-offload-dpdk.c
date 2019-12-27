@@ -29,6 +29,7 @@
 #include "uuid.h"
 #include "netdev-offload-dpdk-private.h"
 #include "odp-util.h"
+#include "unixctl.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk);
 
@@ -471,9 +472,45 @@ netdev_offload_dpdk_flow_get(struct netdev *netdev,
     return 0;
 }
 
+static void
+netdev_dump_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                     const char *argv[], void *aux OVS_UNUSED)
+{
+    struct ds reply = DS_EMPTY_INITIALIZER;
+
+    struct netdev *netdev = netdev_from_name(argv[1]);
+    if (netdev == NULL) {
+        unixctl_command_reply_error(conn,
+                                    "netdev not found");
+        return;
+    }
+
+    struct ufid_to_rte_flow_data *data;
+    struct cmap *hw_flows = &netdev->hw_info.hw_flows;
+
+    CMAP_FOR_EACH (data, node, hw_flows) {
+        odp_format_ufid(&data->ufid, &reply); 
+        ds_put_format(&reply, ", refcnt:%d, rte_flow:%p", ovs_refcount_read(&data->refcnt), \
+                                    data->rte_flow);
+        if (data->stats.n_packets) {
+            ds_put_format(&reply, ", packets:%" PRIu64 ", bytes:%" PRIu64, \
+                            data->stats.n_packets, data->stats.n_bytes);
+        }
+        ds_put_char(&reply, '\n');
+    }
+
+    unixctl_command_reply(conn, ds_cstr(&reply));
+    ds_destroy(&reply);
+}
+
+
 static int
 netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
 {
+    unixctl_command_register("offload/dump-flows", "name",
+                             1, 1, netdev_dump_hw_flows,
+                             NULL);
+
     return netdev_dpdk_flow_api_supported(netdev) ? 0 : EOPNOTSUPP;
 }
 

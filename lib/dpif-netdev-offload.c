@@ -16,6 +16,7 @@
 #include "netdev-vport-private.h"
 #include "odp-util.h"
 #include "openvswitch/vlog.h"
+#include "unixctl.h"
 
 VLOG_DEFINE_THIS_MODULE(dpif_netdev_offload);
 
@@ -25,11 +26,19 @@ dp_netdev_flow_offload_main(void *data);
 static struct dp_flow_offload g_dp_flow_offload;
 static struct ovsthread_once offload_thread_once
       = OVSTHREAD_ONCE_INITIALIZER;
+static void
+dp_netdev_dump_vtp_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                            const char *argv[], void *aux OVS_UNUSED);
 
 struct dp_flow_offload *
 dp_netdev_offload_new(void)
 {
     if (ovsthread_once_start(&offload_thread_once)) {
+
+        unixctl_command_register("offload/dump-vtp", "name",
+                1, 1, dp_netdev_dump_vtp_hw_flows,
+                NULL);
+
         struct dp_flow_offload *dp_flow_offload = &g_dp_flow_offload;
         ovs_mutex_init(&dp_flow_offload->mutex);
         ovs_list_init(&dp_flow_offload->list);
@@ -1258,4 +1267,60 @@ exit:
     return 0;
 }
 
+static void
+dp_netdev_dump_vtp_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                            const char *argv[], void *_aux OVS_UNUSED)
+{
+    struct ds reply = DS_EMPTY_INITIALIZER;
 
+    struct netdev *netdev = netdev_from_name(argv[1]);
+    if (netdev == NULL) {
+        unixctl_command_reply_error(conn,
+                                    "netdev not found");
+        return;
+    }
+    
+    if (!netdev_vport_is_vport_class(netdev_get_class(netdev))) {
+        unixctl_command_reply_error(conn,
+                                    "netdev not a vport");
+        return; 
+    }
+
+    struct netdev_vport *vport = netdev_vport_cast(netdev);
+
+    if (!vport->offload_aux) {
+        unixctl_command_reply(conn, "");
+        return;
+    }
+
+    struct tnl_offload_aux *aux = vport->offload_aux;
+
+    ovs_rwlock_rdlock(&aux->rwlock);
+    ds_put_cstr(&reply, "INGRESS flow:\n");
+    struct ingress_flow *inflow;
+    HMAP_FOR_EACH (inflow, node, &aux->ingress_flows) {
+        odp_format_ufid(&inflow->flow->mega_ufid, &reply); 
+        ds_put_format(&reply, ", netdev:%s\n", netdev_get_name(inflow->ingress_netdev));
+    }
+
+    ds_put_cstr(&reply, "TNL_POP flow:\n");
+    struct tnl_pop_flow *tnlflow;
+    HMAP_FOR_EACH (tnlflow, node, &aux->tnl_pop_flows) {
+        odp_format_ufid(&tnlflow->flow->mega_ufid, &reply); 
+        ds_put_format(&reply, ", ref:%d\n", tnlflow->ref);
+    }
+
+    ovs_u128 mega_ufid;
+    ds_put_cstr(&reply, "MERGED flow:\n");
+    HMAP_FOR_EACH (inflow, node, &aux->ingress_flows) {
+        HMAP_FOR_EACH (tnlflow, node, &aux->tnl_pop_flows) {
+            tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
+            odp_format_ufid(&mega_ufid, &reply);
+            ds_put_char(&reply, '\n');
+        }
+    }
+    ovs_rwlock_unlock(&aux->rwlock);
+
+    unixctl_command_reply(conn, ds_cstr(&reply));
+    ds_destroy(&reply);
+}
