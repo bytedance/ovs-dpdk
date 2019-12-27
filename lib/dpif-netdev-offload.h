@@ -89,6 +89,12 @@ dpif_netdev_offload_used(struct dp_netdev_flow *netdev_flow, \
                          long long now);
 void
 dp_netdev_offload_restart(struct dp_flow_offload *offload);
+
+bool
+dp_netdev_offload_pause(struct dp_flow_offload *offload);
+
+void
+dp_netdev_offload_resume(struct dp_flow_offload *offload, bool prev);
 #ifdef  __cplusplus
 }
 #endif

@@ -501,6 +501,7 @@ netdev_dump_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     unixctl_command_reply(conn, ds_cstr(&reply));
     ds_destroy(&reply);
+    netdev_close(netdev);
 }
 
 

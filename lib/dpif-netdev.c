@@ -4412,6 +4412,8 @@ reconfigure_datapath(struct dp_netdev *dp)
     struct dp_netdev_port *port;
     int wanted_txqs;
 
+    bool offload_prev = dp_netdev_offload_pause(dp->dp_flow_offload);
+
     dp->last_reconfigure_seq = seq_read(dp->reconfigure_seq);
 
     /* Step 1: Adjust the pmd threads based on the datapath ports, the cores
@@ -4568,6 +4570,8 @@ reconfigure_datapath(struct dp_netdev *dp)
 
     /* Check if PMD Auto LB is to be enabled */
     set_pmd_auto_lb(dp);
+
+    dp_netdev_offload_resume(dp->dp_flow_offload, offload_prev);
 }
 
 /* Returns true if one of the netdevs in 'dp' requires a reconfiguration */

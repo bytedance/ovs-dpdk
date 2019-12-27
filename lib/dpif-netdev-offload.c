@@ -1283,6 +1283,7 @@ dp_netdev_dump_vtp_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
     if (!netdev_vport_is_vport_class(netdev_get_class(netdev))) {
         unixctl_command_reply_error(conn,
                                     "netdev not a vport");
+        netdev_close(netdev);
         return; 
     }
 
@@ -1290,6 +1291,7 @@ dp_netdev_dump_vtp_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     if (!vport->offload_aux) {
         unixctl_command_reply(conn, "");
+        netdev_close(netdev);
         return;
     }
 
@@ -1323,4 +1325,21 @@ dp_netdev_dump_vtp_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     unixctl_command_reply(conn, ds_cstr(&reply));
     ds_destroy(&reply);
+    netdev_close(netdev);
+}
+
+bool
+dp_netdev_offload_pause(struct dp_flow_offload *offload)
+{
+    if (offload->req == true) {
+        atomic_store_explicit(&offload->req, false, memory_order_seq_cst);
+        return true;
+    }
+    return false;
+}
+
+void
+dp_netdev_offload_resume(struct dp_flow_offload *offload, bool prev)
+{
+    atomic_store_explicit(&offload->req, prev, memory_order_seq_cst);
 }
