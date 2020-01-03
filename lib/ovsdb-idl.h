@@ -89,6 +89,7 @@ int ovsdb_idl_get_last_error(const struct ovsdb_idl *);
 void ovsdb_idl_set_probe_interval(const struct ovsdb_idl *, int probe_interval);
 
 void ovsdb_idl_check_consistency(const struct ovsdb_idl *);
+void ovsdb_idl_txn_abort_all(struct ovsdb_idl *);
 
 const struct ovsdb_idl_class *ovsdb_idl_get_class(const struct ovsdb_idl *);
 const struct ovsdb_idl_table_class *ovsdb_idl_table_class_from_column(

@@ -649,6 +649,12 @@ ofproto_set_controllers(struct ofproto *p, struct shash *controllers)
 }
 
 void
+ofproto_remove_controllers(struct ofproto *p, struct shash *controllers)
+{
+    connmgr_remove_controllers(p->connmgr, controllers);
+}
+
+void
 ofproto_set_fail_mode(struct ofproto *p, enum ofproto_fail_mode fail_mode)
 {
     connmgr_set_fail_mode(p->connmgr, fail_mode);

@@ -70,6 +70,8 @@
 #include "lib/vswitch-idl.h"
 #include "xenserver.h"
 #include "vlan-bitmap.h"
+#include "ndu.h"
+#include "openvswitch/util.h"
 
 VLOG_DEFINE_THIS_MODULE(bridge);
 
@@ -353,6 +355,8 @@ static bool iface_is_synthetic(const struct iface *);
 static ofp_port_t iface_get_requested_ofp_port(
     const struct ovsrec_interface *);
 static ofp_port_t iface_pick_ofport(const struct ovsrec_interface *);
+static int
+bridge_remove_services_and_snoop(void);
 
 
 static void discover_types(const struct ovsrec_open_vswitch *cfg);
@@ -518,6 +522,15 @@ bridge_init(const char *remote)
                              bridge_unixctl_dump_flows, NULL);
     unixctl_command_register("bridge/reconnect", "[bridge]", 0, 1,
                              bridge_unixctl_reconnect, NULL);
+
+    struct ndu_ctx ndu_ctx = {
+        .remote = (char*)remote,
+        .idl = idl,
+        .br_remove_services_and_snoop = \
+                            bridge_remove_services_and_snoop,
+    };
+    ndu_init(&ndu_ctx);
+
     lacp_init();
     bond_init();
     cfm_init();
@@ -547,7 +560,9 @@ bridge_exit(bool delete_datapath)
         bridge_destroy(br, delete_datapath);
     }
 
-    ovsdb_idl_destroy(idl);
+    ndu_destroy();
+    if (idl)
+        ovsdb_idl_destroy(idl);
 }
 
 /* Looks at the list of managers in 'ovs_cfg' and extracts their remote IP
@@ -3227,6 +3242,9 @@ bridge_run(void)
                || !ovsdb_idl_has_ever_connected(idl)) {
         /* Returns if not holding the lock or not done retrieving db
          * contents. */
+        system_stats_enable(false);
+        ndu_run();
+        bridge_run__();
         return;
     }
     cfg = ovsrec_open_vswitch_first(idl);
@@ -3308,6 +3326,7 @@ bridge_run(void)
         }
     }
 
+    ndu_run();
     run_stats_update();
     run_status_update();
     run_system_stats();
@@ -3318,6 +3337,8 @@ bridge_wait(void)
 {
     struct sset types;
     const char *type;
+
+    ndu_wait();
 
     ovsdb_idl_wait(idl);
     if (daemonize_txn) {
@@ -3339,8 +3360,12 @@ bridge_wait(void)
         HMAP_FOR_EACH (br, node, &all_bridges) {
             ofproto_wait(br->ofproto);
         }
-        stats_update_wait();
-        status_update_wait();
+
+        if (ndu_state() == NDU_STATE_IDLE) {
+            stats_update_wait();
+            status_update_wait();
+            system_stats_enable(true);
+        }
     }
 
     system_stats_wait();
@@ -3793,6 +3818,31 @@ get_controller_ofconn_type(const char *target, const char *type)
             ? (!strcmp(type, "primary") ? OFCONN_PRIMARY : OFCONN_SERVICE)
             : (!vconn_verify_name(target) ? OFCONN_PRIMARY : OFCONN_SERVICE));
 }
+
+static int
+bridge_remove_services_and_snoop(void)
+{
+    const struct bridge *br;
+
+    HMAP_FOR_EACH (br, node, &all_bridges) {
+        struct shash ocs = SHASH_INITIALIZER(&ocs);
+        VLOG_INFO("Remove %s mgt unix socket\n", br->name);
+        shash_add_nocopy(
+                &ocs, xasprintf("punix:%s/%s.mgmt", ovs_rundir(), br->name), (void*)1);
+        ofproto_remove_controllers(br->ofproto, &ocs);
+        shash_destroy(&ocs);
+
+        if (ofproto_has_snoops(br->ofproto)) {
+            struct sset snoops;
+            sset_init(&snoops);
+            /* empty snoops */
+            ofproto_set_snoops(br->ofproto, &snoops);
+            sset_destroy(&snoops);
+        }
+    }
+    return 0;
+}
+
 
 static void
 bridge_configure_remotes(struct bridge *br,

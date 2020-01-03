@@ -4,6 +4,8 @@ CLEANFILES += \
 	vswitchd/ovs-vswitchd.8
 
 vswitchd_ovs_vswitchd_SOURCES = \
+	vswitchd/ndu.c \
+	vswitchd/ndu.h \
 	vswitchd/bridge.c \
 	vswitchd/bridge.h \
 	vswitchd/ovs-vswitchd.c \

@@ -205,4 +205,6 @@ void ofmonitor_compose_refresh_updates(struct rule_collection *rules,
 void connmgr_send_table_status(struct connmgr *,
                                const struct ofputil_table_desc *td,
                                uint8_t reason);
+void
+connmgr_remove_controllers(struct connmgr *mgr, struct shash *controllers);
 #endif /* connmgr.h */

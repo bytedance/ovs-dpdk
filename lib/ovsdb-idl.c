@@ -348,7 +348,7 @@ static void ovsdb_idl_row_clear_new(struct ovsdb_idl_row *);
 static void ovsdb_idl_row_clear_arcs(struct ovsdb_idl_row *, bool destroy_dsts);
 
 static void ovsdb_idl_db_txn_abort_all(struct ovsdb_idl_db *);
-static void ovsdb_idl_txn_abort_all(struct ovsdb_idl *);
+void ovsdb_idl_txn_abort_all(struct ovsdb_idl *);
 static bool ovsdb_idl_db_txn_process_reply(struct ovsdb_idl_db *,
                                            const struct jsonrpc_msg *msg);
 static bool ovsdb_idl_txn_extract_mutations(struct ovsdb_idl_row *,
@@ -4676,7 +4676,7 @@ ovsdb_idl_db_txn_abort_all(struct ovsdb_idl_db *db)
     }
 }
 
-static void
+void
 ovsdb_idl_txn_abort_all(struct ovsdb_idl *idl)
 {
     ovsdb_idl_db_txn_abort_all(&idl->server);

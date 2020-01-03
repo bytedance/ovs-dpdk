@@ -334,8 +334,6 @@ static void handle_upcalls(struct udpif *, struct upcall *, size_t n_upcalls);
 static void udpif_stop_threads(struct udpif *);
 static void udpif_start_threads(struct udpif *, size_t n_handlers,
                                 size_t n_revalidators);
-static void udpif_pause_revalidators(struct udpif *);
-static void udpif_resume_revalidators(struct udpif *);
 static void *udpif_upcall_handler(void *);
 static void *udpif_revalidator(void *);
 static unsigned long udpif_get_n_flows(struct udpif *);
@@ -593,7 +591,7 @@ udpif_start_threads(struct udpif *udpif, size_t n_handlers_,
 /* Pauses all revalidators.  Should only be called by the main thread.
  * When function returns, all revalidators are paused and will proceed
  * only after udpif_resume_revalidators() is called. */
-static void
+void
 udpif_pause_revalidators(struct udpif *udpif)
 {
     if (udpif->backer->recv_set_enable) {
@@ -604,7 +602,7 @@ udpif_pause_revalidators(struct udpif *udpif)
 
 /* Resumes the pausing of revalidators.  Should only be called by the
  * main thread. */
-static void
+void
 udpif_resume_revalidators(struct udpif *udpif)
 {
     if (udpif->backer->recv_set_enable) {

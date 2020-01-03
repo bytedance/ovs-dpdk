@@ -559,6 +559,8 @@ int ofproto_port_get_cfm_status(const struct ofproto *,
 enum ofputil_table_miss ofproto_table_get_miss_config(const struct ofproto *,
                                                       uint8_t table_id);
 
+void
+ofproto_remove_controllers(struct ofproto *p, struct shash *controllers);
 #ifdef  __cplusplus
 }
 #endif

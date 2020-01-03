@@ -568,6 +568,26 @@ connmgr_free_controller_info(struct shash *info)
     shash_destroy(info);
 }
 
+
+/* this function is used to remove bridge of-service such as br-int.mgmt */
+void
+connmgr_remove_controllers(struct connmgr *mgr, struct shash *controllers)
+{
+    ovs_mutex_lock(&ofproto_mutex);
+    struct ofservice *ofservice, *next_ofservice;
+    HMAP_FOR_EACH_SAFE (ofservice, next_ofservice, hmap_node, &mgr->services) {
+        const char *target = ofservice->target;
+        struct ofproto_controller *c = shash_find_data(controllers, target);
+        if (c) {
+            VLOG_INFO("%s: removed %s controller \"%s\"",
+                      mgr->name, ofconn_type_to_string(ofservice->type),
+                      target);
+            ofservice_destroy(ofservice);
+        }
+    }
+    ovs_mutex_unlock(&ofproto_mutex);
+}
+
 /* Changes 'mgr''s set of controllers to the 'n_controllers' controllers in
  * 'controllers'. */
 void
