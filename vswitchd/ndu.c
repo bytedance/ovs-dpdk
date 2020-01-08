@@ -5,6 +5,7 @@
 #include <config.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include "ndu.h"
 #include "jsonrpc.h"
 #include "lib/dirs.h"
@@ -22,6 +23,9 @@
 #include "stream-provider.h"
 #include "stream.h"
 #include "util.h"
+#include "lib/fatal-signal.h"
+#include "daemon.h"
+#include "daemon-private.h"
 
 VLOG_DEFINE_THIS_MODULE(ndu);
 
@@ -31,6 +35,7 @@ static char *state_name[] = {
         [NDU_STATE_REVALIDATOR_PAUSE] = "revalidator_pause",
         [NDU_STATE_OVSDB_UNLOCK] = "ovsdb_unlock",
         [NDU_STATE_BR_RM_SV_AND_SNOOP] = "br_service_and_snoop",
+        [NDU_STATE_PID_FILE] = "pid_file",
         [NDU_STATE_STAGE1_FINISH] = "stage1",
         [NDU_STATE_DATAPATH_RELEASE] = "dp_off",
         [NDU_STATE_DONE] = "done",
@@ -52,6 +57,10 @@ struct ndu_rv_pause_ctx {
     struct udpif *udpif;
 };
 
+struct ndu_pid_file_ctx {
+    char *upfile;
+};
+
 struct ndu_fsm {
     int state;
     int (*run)(struct ndu_fsm *fsm);
@@ -59,6 +68,7 @@ struct ndu_fsm {
         struct ndu_hwol_off_ctx hwoff_ctx;
         struct ndu_rv_pause_ctx rv_ctx;
         struct ndu_ovsdb_unlock_ctx db_unlock_ctx;
+        struct ndu_pid_file_ctx pid_ctx;
     } ctx;
 };
 
@@ -108,8 +118,7 @@ static int ndu_server_init(void)
 
 static int ndu_fsm_run(struct ndu_fsm *fsm);
 
-static void ndu_fsm_start(struct ndu_fsm *fsm,
-                          int (*run)(struct ndu_fsm *fsm))
+static void ndu_fsm_start(struct ndu_fsm *fsm, int (*run)(struct ndu_fsm *fsm))
 {
     fsm->run = run;
 }
@@ -150,6 +159,7 @@ void ndu_init(struct ndu_ctx *ctx)
     ndu_server_init();
     ndu_ctx = *ctx;
     ndu_ctx.remote = xstrdup(ctx->remote);
+    ndu_ctx.pidfile = xstrdup(ctx->pidfile);
 }
 
 static int hwol_off(struct ovsdb_idl *idl, struct ndu_hwol_off_ctx *ctx)
@@ -370,10 +380,10 @@ static int ndu_ovsdb_unlock_run(struct ndu_ovsdb_unlock_ctx *ctx)
 {
     if (ndu_ctx.idl) {
         /* release ovs-vswitchd lock */
-        if (ovsdb_idl_has_lock(ndu_ctx.idl) && \
-                ctx->idl_seqno != ovsdb_idl_get_seqno(ndu_ctx.idl)) {
+        if (ovsdb_idl_has_lock(ndu_ctx.idl) &&
+            ctx->idl_seqno != ovsdb_idl_get_seqno(ndu_ctx.idl)) {
             VLOG_INFO("Trying to release db lock\n");
-            ctx->idl_seqno = ovsdb_idl_get_seqno(ndu_ctx.idl); 
+            ctx->idl_seqno = ovsdb_idl_get_seqno(ndu_ctx.idl);
             ovsdb_idl_txn_abort_all(ndu_ctx.idl);
             ovsdb_idl_set_lock(ndu_ctx.idl, NULL);
             return EAGAIN;
@@ -402,13 +412,39 @@ static int ndu_ovsdb_unlock_rollback(struct ndu_ovsdb_unlock_ctx *ctx)
     return 0;
 }
 
+static int ndu_pid_file_run(struct ndu_pid_file_ctx *ctx)
+{
+    if (!ctx->upfile)
+        ctx->upfile = xasprintf("%s.upgrading", ndu_ctx.pidfile);
+    int err = rename(ndu_ctx.pidfile, ctx->upfile);
+    fatal_signal_add_file_to_unlink(ctx->upfile);
+    fatal_signal_remove_file_to_unlink(ndu_ctx.pidfile);
+    return err;
+}
+
+static int ndu_pid_file_rollback(struct ndu_pid_file_ctx *ctx)
+{
+    int err = rename(ctx->upfile, ndu_ctx.pidfile);
+    fatal_signal_add_file_to_unlink(ndu_ctx.pidfile);
+    fatal_signal_remove_file_to_unlink(ctx->upfile);
+    free(ctx->upfile);
+    ctx->upfile = NULL;
+    return err;
+}
+
 static int ndu_fsm_rollback(struct ndu_fsm *fsm)
 {
     int err;
     switch (fsm->state) {
     case NDU_STATE_STAGE1_FINISH:
-        fsm->state = NDU_STATE_BR_RM_SV_AND_SNOOP;
+        fsm->state = NDU_STATE_PID_FILE;
     /* fall through */
+
+    case NDU_STATE_PID_FILE:
+        err = ndu_pid_file_rollback(&fsm->ctx.pid_ctx);
+        if (err)
+            goto err;
+        fsm->state = NDU_STATE_BR_RM_SV_AND_SNOOP;
 
     case NDU_STATE_BR_RM_SV_AND_SNOOP:
         fsm->state = NDU_STATE_OVSDB_UNLOCK;
@@ -493,9 +529,15 @@ static int ndu_fsm_run(struct ndu_fsm *fsm)
         err = ndu_ctx.br_remove_services_and_snoop();
         if (!err) {
             VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
-            fsm->state = NDU_STATE_STAGE1_FINISH;
+            fsm->state = NDU_STATE_PID_FILE;
         }
         break;
+    case NDU_STATE_PID_FILE:
+        err = ndu_pid_file_run(&fsm->ctx.pid_ctx);
+        if (!err) {
+            VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
+            fsm->state = NDU_STATE_STAGE1_FINISH;
+        }
     case NDU_STATE_STAGE1_FINISH:
         VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
         break;
@@ -676,10 +718,9 @@ void ndu_destroy(void)
     if (ndu_ctx.remote) {
         free(ndu_ctx.remote);
         ndu_ctx.remote = NULL;
+        free(ndu_ctx.pidfile);
+        ndu_ctx.pidfile = NULL;
     }
 }
 
-int ndu_state(void)
-{
-    return ndu_fsm.state;
-}
+int ndu_state(void) { return ndu_fsm.state; }

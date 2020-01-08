@@ -25,6 +25,7 @@
 #include "cfm.h"
 #include "connectivity.h"
 #include "coverage.h"
+#include "daemon-private.h"
 #include "daemon.h"
 #include "dirs.h"
 #include "dpif.h"
@@ -528,6 +529,7 @@ bridge_init(const char *remote)
         .idl = idl,
         .br_remove_services_and_snoop = \
                             bridge_remove_services_and_snoop,
+        .pidfile = pidfile,
     };
     ndu_init(&ndu_ctx);
 
