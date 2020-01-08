@@ -179,5 +179,6 @@ void service_stop(void);
 bool should_service_stop(void);
 void set_pidfile(const char *name);
 void close_standard_fds(void);
+pid_t get_already_running_pid(void);
 
 #endif /* daemon.h */

@@ -1,20 +1,25 @@
 #include <config.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <getopt.h>
 #include "lib/dirs.h"
 #include "lib/jsonrpc.h"
 #include "openvswitch/json.h"
 #include "lib/stream.h"
 #include "openvswitch/vlog.h"
+#include "openvswitch/shash.h"
 #include "util.h"
 
 VLOG_DEFINE_THIS_MODULE(nductl);
-static void usage(void) {
+static void usage(void)
+{
     printf("ovs-nductl PID METHOD\n");
     exit(-1);
 }
 
-static struct jsonrpc *open_jsonrpc(const char *server) {
+static struct jsonrpc *open_jsonrpc(const char *server)
+{
     struct stream *stream;
     int error;
 
@@ -26,9 +31,39 @@ static struct jsonrpc *open_jsonrpc(const char *server) {
 
     return jsonrpc_open(stream);
 }
+
+static bool rollback_if_broken;
+
+static void parse_options(int argc, char *argv[])
+{
+    enum {
+        OPT_ROLLBACK_IF_BROKEN,
+    };
+
+    static const struct option long_options[] = {
+        {"rollback-if-broken", no_argument, NULL, OPT_ROLLBACK_IF_BROKEN},
+        {NULL, 0, NULL, 0},
+    };
+
+    for (;;) {
+        int c;
+        int idx;
+        c = getopt_long(argc, argv, "", long_options, &idx);
+        if (c == -1) {
+            break;
+        }
+        switch (c) {
+        case OPT_ROLLBACK_IF_BROKEN:
+            rollback_if_broken = true;
+            break;
+        }
+    }
+}
+
 #define NDU_UNIX_SOCK_NAME "ovs-ndu"
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     if (argc < 3) {
         usage();
     }
@@ -36,7 +71,23 @@ int main(int argc, char *argv[]) {
     set_program_name(argv[0]);
 
     long int pid;
-    if (!str_to_long(argv[1], 10, &pid))
+    parse_options(argc, argv);
+    int i;
+    int arg0_idx, arg1_idx;
+
+    arg0_idx = arg1_idx = -1;
+    for (i = 1; i < argc; i++) { 
+        if (argv[i][0] != '-') {
+            if (arg0_idx == -1) {
+                arg0_idx = i;
+            } else if (arg1_idx == -1) {
+                arg1_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (!str_to_long(argv[arg0_idx], 10, &pid))
         usage();
 
     char *path = xasprintf("%s/%s.%ld", ovs_rundir(), NDU_UNIX_SOCK_NAME, pid);
@@ -45,17 +96,29 @@ int main(int argc, char *argv[]) {
     struct jsonrpc *rpc = open_jsonrpc(punix_path);
     struct jsonrpc_msg *request, *reply;
     int err;
+    struct json *params;
+    params = json_array_create_empty();
+    if (!strcmp(argv[2], "stage1")) {
+        struct json *p = json_object_create();
+        struct shash *h = json_object(p);
+        struct json *v = rollback_if_broken ? json_string_create("true")
+            : json_string_create("false");
+        shash_add(h, "rollback-if-broken", v);
+        json_array_add(params, p);
+    }
 
-    request = jsonrpc_create_request(argv[2], json_array_create_empty(), NULL);
+    request = jsonrpc_create_request(argv[arg1_idx], params, NULL);
     err = jsonrpc_transact_block(rpc, request, &reply);
     if (err) {
         ovs_fatal(err, "transaction failed");
     }
     if (reply->error) {
-        printf("%s failed: %s\n", argv[2], json_to_string(reply->error, 0));
+        printf("%s failed: %s\n", argv[arg1_idx], json_to_string(reply->error, 0));
     } else {
-        printf("%s success: %s\n", argv[2], json_to_string(reply->result, 0));
+        printf("%s success: %s\n", argv[arg1_idx], json_to_string(reply->result, 0));
     }
+
+    jsonrpc_msg_destroy(reply);
     jsonrpc_close(rpc);
 
     return 0;

@@ -1049,3 +1049,59 @@ daemon_set_new_user(const char *user_spec)
 
     switch_user = true;
 }
+
+pid_t
+get_already_running_pid(void)
+{
+    struct flock lck;
+    char line[128];
+    FILE *file;
+    int error;
+
+    file = fopen(pidfile, "r+");
+    if (!file) {
+        if (errno == ENOENT) {
+            /* no pid file, normal ovs launch */
+            return -1;
+        }
+        error = errno;
+        VLOG_WARN("%s: open: %s", pidfile, ovs_strerror(error));
+        return -1;
+    }
+
+    error = lock_pidfile__(file, F_GETLK, &lck);
+    if (error) {
+        VLOG_WARN("%s: fcntl: %s", pidfile, ovs_strerror(error));
+        fclose(file);
+        return -1;
+    }
+
+    if (lck.l_type == F_UNLCK) {
+        /* file exist, not lock anymore, normal ovs launch */
+        fclose(file);
+        return -1;
+    }
+
+    if (!fgets(line, sizeof line, file)) {
+        if (ferror(file)) {
+            error = errno;
+            VLOG_WARN("%s: read: %s", pidfile, ovs_strerror(error));
+        } else {
+            error = ESRCH;
+            VLOG_WARN("%s: read: unexpected end of file", pidfile);
+        }
+        fclose(file);
+        return -1;
+    }
+
+    if (lck.l_pid != strtoul(line, NULL, 10)) {
+        /* The process that has the pidfile locked is not the process that
+         * created it.  It must be stale, with the process that has it locked
+         * preparing to delete it. */
+        fclose(file);
+        return -1;
+    }
+
+    fclose(file);
+    return lck.l_pid;
+}

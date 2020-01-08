@@ -75,7 +75,8 @@ struct ndu_fsm {
 struct ndu_conn {
     struct jsonrpc *rpc;
     struct json *request_id;
-    unsigned int method;
+    /* by default, rollback_if_broken == true */
+    bool   rollback_if_broken;
     struct ndu_fsm *fsm;
 };
 
@@ -117,18 +118,29 @@ static int ndu_server_init(void)
 }
 
 static int ndu_fsm_run(struct ndu_fsm *fsm);
+static int ndu_fsm_rollback(struct ndu_fsm *fsm);
+
+static int ndu_fsm_go(struct ndu_fsm *fsm)
+{
+    return fsm->run(fsm);
+}
 
 static void ndu_fsm_start(struct ndu_fsm *fsm, int (*run)(struct ndu_fsm *fsm))
 {
     fsm->run = run;
 }
 
-static struct ndu_conn *ndu_conn_new(struct stream *stream)
+static void ndu_fsm_clear(struct ndu_fsm *fsm)
+{
+    fsm->run = NULL;
+}
+
+static struct ndu_conn *ndu_conn_new(struct stream *stream, bool rollback_if_broken)
 {
     struct ndu_conn *conn = xzalloc(sizeof(struct ndu_conn));
     conn->rpc = jsonrpc_open(stream);
     conn->fsm = &ndu_fsm;
-    ndu_fsm_start(conn->fsm, ndu_fsm_run);
+    conn->rollback_if_broken = rollback_if_broken;
     return conn;
 }
 
@@ -137,6 +149,11 @@ static void ndu_conn_destroy(struct ndu_conn *conn)
     if (conn->request_id) {
         json_destroy(conn->request_id);
         conn->request_id = NULL;
+    }
+    if (conn->rollback_if_broken) {
+        ndu_fsm_start(conn->fsm, ndu_fsm_rollback);
+    } else {
+        ndu_fsm_clear(conn->fsm);
     }
     jsonrpc_close(conn->rpc);
     server->conn = NULL;
@@ -604,12 +621,31 @@ static void ndu_jsonrpc_error(struct ndu_conn *conn, const char *str)
     __ndu_jsonrpc_reply(conn, str, jsonrpc_create_error);
 }
 
+static void ndu_handle_stage1_msg(struct jsonrpc_msg *msg, struct ndu_conn *conn)
+{
+    if (msg->params) {
+        struct json_array *array = json_array(msg->params);
+        if (!array->n)
+            return;
+        struct json *o = array->elems[0]; 
+        if (o->type != JSON_OBJECT)
+            return;
+        struct shash *h = json_object(o);
+        struct json *v = shash_find_data(h, "rollback-if-broken");
+        if (v && v->type == JSON_STRING) {
+            if (!strcmp(json_string(v), "false")) {
+                conn->rollback_if_broken = false;
+            }
+        }
+    }
+}
+
 static int ndu_conn_run(struct ndu_conn *conn)
 {
     int error;
 
     if (conn->request_id) {
-        error = conn->fsm->run(conn->fsm);
+        error = ndu_fsm_go(conn->fsm);
 
         if (error == EAGAIN) {
             return error;
@@ -619,6 +655,7 @@ static int ndu_conn_run(struct ndu_conn *conn)
             } else {
                 ndu_jsonrpc_reply(conn, "success");
             }
+            ndu_fsm_clear(conn->fsm);
         }
     }
 
@@ -634,6 +671,7 @@ static int ndu_conn_run(struct ndu_conn *conn)
         if (msg->type == JSONRPC_REQUEST) {
             conn->request_id = json_clone(msg->id);
             if (!strcmp(msg->method, "stage1")) {
+                ndu_handle_stage1_msg(msg, conn);
                 ndu_fsm_start(conn->fsm, ndu_fsm_run);
                 VLOG_INFO("Stage1 begins\n");
                 goto finish_msg;
@@ -665,7 +703,6 @@ static int ndu_conn_run(struct ndu_conn *conn)
         }
     finish_msg:
         jsonrpc_msg_destroy(msg);
-        jsonrpc_run(conn->rpc);
     }
 
     return error;
@@ -688,10 +725,26 @@ void ndu_run(void)
         return;
     }
 
+    /* if there is no conn, two cases:
+     * 1) normal case, ndu_fsm.run == NULL;
+     * 2) conn is broken, and ndu_fsm.run == ndu_fsm_rollback
+     */
+    if (ndu_fsm.run) {
+        error = ndu_fsm_go(&ndu_fsm);
+        if (error && error != EAGAIN) {
+            VLOG_ERR("conn is broken, rollback failed!, abort and \
+                      let the monitor process relaunch ovs\n");
+        } else {
+           if (!error)
+               ndu_fsm_clear(&ndu_fsm);
+           /* else error == EAGAIN */
+        }
+    }
+
     struct stream *stream;
     error = pstream_accept(server->listener, &stream);
     if (!error) {
-        server->conn = ndu_conn_new(stream);
+        server->conn = ndu_conn_new(stream, true);
     } else if (error == EAGAIN) {
         return;
     } else {
@@ -707,8 +760,13 @@ void ndu_wait(void)
 
     pstream_wait(server->listener);
     if (server->conn) {
-        jsonrpc_wait(server->conn->rpc);
-        ndu_fsm_wait(server->conn->fsm);
+        struct ndu_conn *conn = server->conn;
+        struct jsonrpc *rpc = conn->rpc;
+        jsonrpc_wait(rpc);
+        if (!jsonrpc_get_backlog(rpc) && !conn->request_id) {
+            jsonrpc_recv_wait(rpc);
+        }
+        ndu_fsm_wait(conn->fsm);
     }
 }
 
@@ -724,3 +782,63 @@ void ndu_destroy(void)
 }
 
 int ndu_state(void) { return ndu_fsm.state; }
+
+struct ndu_client_conn {
+    struct jsonrpc *rpc;
+};
+
+static struct ndu_client_conn client_conn;
+
+int ndu_connect_and_stage1(long int pid)
+{
+    if (client_conn.rpc) {
+        return 0;
+    }
+    struct stream *stream;
+    int error;
+    char *unix_path = xasprintf("unix:%s/%s.%ld", \
+                    ovs_rundir(), NDU_UNIX_SOCK_NAME, pid);
+
+    error = stream_open_block(
+        jsonrpc_stream_open(unix_path, &stream, DSCP_DEFAULT), -1, &stream);
+    free(unix_path);
+    if (error) {
+        return error;
+    }
+    struct jsonrpc *rpc;
+
+    rpc = jsonrpc_open(stream);
+    if (!rpc) {
+        stream_close(stream);
+        return -1;
+    }
+    client_conn.rpc = rpc;
+    struct jsonrpc_msg *request, *reply;
+
+    request = jsonrpc_create_request("stage1", \
+            json_array_create_empty(), NULL);
+    error = jsonrpc_transact_block(rpc, request, &reply);
+
+    if (error) {
+        jsonrpc_close(rpc);
+        client_conn.rpc = NULL;
+        return -1;
+    }
+
+    if (reply->error) {
+        VLOG_ERR("stage1 failed: %s\n", json_to_string(reply->error, 0));
+        jsonrpc_close(rpc);
+        client_conn.rpc = NULL;
+        return -1;
+    }
+
+    jsonrpc_msg_destroy(reply);
+    return 0;
+}
+
+void ndu_close_rpc_after_fork(void)
+{
+    if (client_conn.rpc)
+        jsonrpc_close(client_conn.rpc);
+}
+
