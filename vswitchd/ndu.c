@@ -731,14 +731,14 @@ void ndu_run(void)
      */
     if (ndu_fsm.run) {
         error = ndu_fsm_go(&ndu_fsm);
-        if (error && error != EAGAIN) {
-            VLOG_ERR("conn is broken, rollback failed!, abort and \
-                      let the monitor process relaunch ovs\n");
-        } else {
-           if (!error)
-               ndu_fsm_clear(&ndu_fsm);
-           /* else error == EAGAIN */
+        if (error != EAGAIN) {
+            if (error) {
+                VLOG_ERR("conn is broken, rollback failed!, abort and \
+                        let the monitor process relaunch ovs\n");
+            }
+            ndu_fsm_clear(&ndu_fsm);
         }
+        return;
     }
 
     struct stream *stream;
@@ -836,9 +836,11 @@ int ndu_connect_and_stage1(long int pid)
     return 0;
 }
 
-void ndu_close_rpc_after_fork(void)
+void ndu_close_rpc_for_monitor(void)
 {
-    if (client_conn.rpc)
+    if (client_conn.rpc) {
         jsonrpc_close(client_conn.rpc);
+        client_conn.rpc = NULL;
+    }
 }
 

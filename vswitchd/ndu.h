@@ -30,5 +30,5 @@ void ndu_destroy(void);
 int ndu_state(void);
 
 int ndu_connect_and_stage1(long int pid);
-void ndu_close_rpc_after_fork(void);
+void ndu_close_rpc_for_monitor(void);
 #endif
