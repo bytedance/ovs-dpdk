@@ -1611,7 +1611,8 @@ dp_netdev_free(struct dp_netdev *dp)
     ovs_mutex_unlock(&dp->port_mutex);
 
     dp_netdev_destroy_all_pmds(dp, true);
-    dp_netdev_join_offload_thread(dp->dp_flow_offload);
+    if (!dp->dp_flow_offload->exit)
+        dp_netdev_join_offload_thread(dp->dp_flow_offload);
     cmap_destroy(&dp->poll_threads);
 
     ovs_mutex_destroy(&dp->tx_qid_pool_mutex);

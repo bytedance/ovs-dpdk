@@ -86,6 +86,7 @@ dp_netdev_join_offload_thread(struct dp_flow_offload *offload)
     xpthread_cond_signal(&offload->cond);
     ovs_mutex_unlock(&offload->mutex);
     xpthread_join(offload->thread, NULL);
+    offload->thread = (pthread_t)0;
 }
 
 void

@@ -567,8 +567,7 @@ bridge_exit(bool delete_datapath)
     }
 
     ndu_destroy();
-    if (idl)
-        ovsdb_idl_destroy(idl);
+    ovsdb_idl_destroy(idl);
 }
 
 /* Looks at the list of managers in 'ovs_cfg' and extracts their remote IP
