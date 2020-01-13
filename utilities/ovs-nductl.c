@@ -76,7 +76,7 @@ int main(int argc, char *argv[])
     int arg0_idx, arg1_idx;
 
     arg0_idx = arg1_idx = -1;
-    for (i = 1; i < argc; i++) { 
+    for (i = 1; i < argc; i++) {
         if (argv[i][0] != '-') {
             if (arg0_idx == -1) {
                 arg0_idx = i;
@@ -100,10 +100,8 @@ int main(int argc, char *argv[])
     params = json_array_create_empty();
     if (!strcmp(argv[2], "stage1")) {
         struct json *p = json_object_create();
-        struct shash *h = json_object(p);
-        struct json *v = rollback_if_broken ? json_string_create("true")
-            : json_string_create("false");
-        shash_add(h, "rollback-if-broken", v);
+        json_object_put_string(p, "rollback-if-broken",
+                               rollback_if_broken ? "true" : "false");
         json_array_add(params, p);
     }
 
@@ -113,9 +111,11 @@ int main(int argc, char *argv[])
         ovs_fatal(err, "transaction failed");
     }
     if (reply->error) {
-        printf("%s failed: %s\n", argv[arg1_idx], json_to_string(reply->error, 0));
+        printf("%s failed: %s\n", argv[arg1_idx],
+               json_to_string(reply->error, 0));
     } else {
-        printf("%s success: %s\n", argv[arg1_idx], json_to_string(reply->result, 0));
+        printf("%s success: %s\n", argv[arg1_idx],
+               json_to_string(reply->result, 0));
     }
 
     jsonrpc_msg_destroy(reply);

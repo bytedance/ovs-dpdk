@@ -22,6 +22,9 @@
 #include <sys/stat.h>
 #include <getopt.h>
 
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <rte_errno.h>
 #include <rte_log.h>
 #include <rte_memzone.h>
@@ -376,10 +379,13 @@ dpdk_init__(const struct smap *ovs_other_config)
         svec_add_nocopy(&args, xasprintf("%d", cpu));
     }
 
+    /* for this process, use --file-prefix */
+    svec_add(&args, "--file-prefix");
+    svec_add_nocopy(&args, xasprintf("%ld-", (long int)getpid()));
+
     svec_terminate(&args);
 
     optind = 1;
-
     if (VLOG_IS_INFO_ENABLED()) {
         struct ds eal_args = DS_EMPTY_INITIALIZER;
         char *joined_args = svec_join(&args, " ", ".");

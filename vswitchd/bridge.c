@@ -358,6 +358,8 @@ static ofp_port_t iface_get_requested_ofp_port(
 static ofp_port_t iface_pick_ofport(const struct ovsrec_interface *);
 static int
 bridge_remove_services_and_snoop(void);
+static int
+bridge_remove_all_bridges(void);
 
 
 static void discover_types(const struct ovsrec_open_vswitch *cfg);
@@ -529,6 +531,8 @@ bridge_init(const char *remote)
         .idl = idl,
         .br_remove_services_and_snoop = \
                             bridge_remove_services_and_snoop,
+        .br_remove_all_bridges = \
+                            bridge_remove_all_bridges,
         .pidfile = pidfile,
     };
     ndu_init(&ndu_ctx);
@@ -3212,6 +3216,19 @@ bridge_run__(void)
     }
 }
 
+static int
+bridge_remove_all_bridges(void)
+{
+    /* this will delete all pmd threads, release all
+     * netdevs and free datapath.
+     */
+    struct bridge *br, *next_br;
+    HMAP_FOR_EACH_SAFE (br, next_br, node, &all_bridges) {
+        bridge_destroy(br, true);
+    }
+    return 0;
+}
+
 void
 bridge_run(void)
 {
@@ -3283,6 +3300,10 @@ bridge_run(void)
         stream_ssl_set_key_and_cert(ssl->private_key, ssl->certificate);
         stream_ssl_set_ca_cert_file(ssl->ca_cert, ssl->bootstrap_ca_cert);
     }
+
+    /* before bridge_reconfiguration, do netdev dpdk probe */
+    if (ndu_client_before_stage2() == EAGAIN)
+        return;
 
     if (ovsdb_idl_get_seqno(idl) != idl_seqno ||
         if_notifier_changed(ifnotifier)) {

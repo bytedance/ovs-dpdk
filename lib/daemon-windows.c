@@ -500,6 +500,11 @@ make_pidfile(void)
 void
 daemonize_start(bool access_datapath OVS_UNUSED)
 {
+}
+
+void
+daemonize_make_pidfile(void)
+{
     if (pidfile) {
         make_pidfile();
     }

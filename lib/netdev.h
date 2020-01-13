@@ -345,6 +345,7 @@ typedef void netdev_dump_queue_stats_cb(unsigned int queue_id,
 int netdev_dump_queue_stats(const struct netdev *,
                             netdev_dump_queue_stats_cb *, void *aux);
 
+void netdev_set_probe(struct netdev *);
 extern struct seq *tnl_conf_seq;
 
 #ifndef _WIN32

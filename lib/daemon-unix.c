@@ -482,13 +482,17 @@ daemonize_start(bool access_datapath)
 
     forbid_forking("running in daemon process");
 
-    if (pidfile) {
-        make_pidfile();
-    }
-
     /* Make sure that the unixctl commands for vlog get registered in a
      * daemon, even before the first log message. */
     vlog_init();
+}
+
+void
+daemonize_make_pidfile(void)
+{
+    if (pidfile) {
+        make_pidfile();
+    }
 }
 
 /* If daemonization is configured, then this function notifies the parent
