@@ -3201,6 +3201,33 @@ exit:
     return error;
 }
 
+static int
+netdev_linux_set_config(struct netdev *netdev, const struct smap *args,
+                        char **errp)
+{
+    const char *ipaddr = smap_get(args, "ipaddr");
+    const char *netmask = smap_get(args, "netmask");
+    struct in_addr ip, mask;
+    if (!ipaddr || !netmask) {
+        return 0;
+    }
+    if (!ip_parse(ipaddr, &ip.s_addr) || !ip_parse(netmask, &mask.s_addr)) {
+        if (errp) {
+            *errp = xasprintf("invalid ip or mask addr %s/%s", ipaddr, netmask);
+        }
+        return -1;
+    }
+
+    netdev_turn_flags_on(netdev, NETDEV_UP, NULL);
+    if (netdev_set_in4(netdev, ip, mask)) {
+        if (errp) {
+            *errp = xasprintf("failed to set %s ipaddr/netmask", netdev_get_name(netdev));
+        }
+        return -1;
+    }
+    return 0;
+}
+
 #define NETDEV_LINUX_CLASS_COMMON                               \
     .run = netdev_linux_run,                                    \
     .wait = netdev_linux_wait,                                  \
@@ -3269,6 +3296,7 @@ const struct netdev_class netdev_tap_class = {
     .rxq_construct = netdev_linux_rxq_construct,
     .rxq_destruct = netdev_linux_rxq_destruct,
     .rxq_recv = netdev_linux_rxq_recv,
+    .set_config = netdev_linux_set_config,
 };
 
 const struct netdev_class netdev_internal_class = {
