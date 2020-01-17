@@ -90,7 +90,7 @@ main(int argc, char *argv[])
     fatal_ignore_sigpipe();
 
     pid_t already_running_pid = get_already_running_pid();
-    daemonize_start(true);
+    daemonize_start__(true);
     if (already_running_pid > 0) {
         ndu_connect_and_stage1(already_running_pid);
     }

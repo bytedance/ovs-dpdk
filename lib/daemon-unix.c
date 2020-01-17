@@ -437,7 +437,7 @@ monitor_daemon(pid_t daemon_pid)
  * daemon_complete()) or that it failed to start up (by exiting with a nonzero
  * exit code). */
 void
-daemonize_start(bool access_datapath)
+daemonize_start__(bool access_datapath)
 {
     assert_single_threaded();
     daemonize_fd = -1;
@@ -485,6 +485,13 @@ daemonize_start(bool access_datapath)
     /* Make sure that the unixctl commands for vlog get registered in a
      * daemon, even before the first log message. */
     vlog_init();
+}
+
+void
+daemonize_start(bool access_datapath)
+{
+    daemonize_start__(access_datapath);
+    daemonize_make_pidfile();
 }
 
 void

@@ -168,6 +168,7 @@ bool get_detach(void);
 void daemon_save_fd(int fd);
 void daemonize(void);
 void daemonize_start(bool access_datapath);
+void daemonize_start__(bool access_datapath);
 void daemonize_complete(void);
 void daemon_set_new_user(const char * user_spec);
 void daemon_become_new_user(bool access_datapath);
