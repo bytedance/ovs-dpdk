@@ -3215,13 +3215,13 @@ netdev_linux_set_config(struct netdev *netdev, const struct smap *args,
         if (errp) {
             *errp = xasprintf("invalid ip or mask addr %s/%s", ipaddr, netmask);
         }
-        return -1;
+        return EINVAL;
     }
 
     netdev_turn_flags_on(netdev, NETDEV_UP, NULL);
     if (netdev_set_in4(netdev, ip, mask)) {
         if (errp) {
-            *errp = xasprintf("failed to set %s ipaddr/netmask", netdev_get_name(netdev));
+            *errp = xasprintf("%s: failed to set %s/%s", netdev_get_name(netdev), ipaddr, netmask);
         }
         return -1;
     }
