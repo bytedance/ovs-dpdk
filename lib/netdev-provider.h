@@ -57,6 +57,9 @@ struct netdev {
      */
     bool probe;
 
+    /* custom args. Currently only used for non-distruptive-update process */
+    struct smap args;
+
     /* If this is 'true', the user explicitly specified an MTU for this
      * netdev.  Otherwise, Open vSwitch is allowed to override it. */
     bool mtu_user_config;

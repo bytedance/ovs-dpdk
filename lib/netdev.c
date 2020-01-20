@@ -427,6 +427,7 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
                 ovsrcu_set(&netdev->flow_api, NULL);
                 netdev->hw_info.oor = false;
                 cmap_init(&netdev->hw_info.hw_flows);
+                smap_init(&netdev->args);
                 netdev->node = shash_add(&netdev_shash, name, netdev);
 
                 /* By default enable one tx and rx queue per netdev. */
@@ -585,6 +586,7 @@ netdev_unref(struct netdev *dev)
         }
         free(dev->name);
         seq_destroy(dev->reconfigure_seq);
+        smap_destroy(&dev->args);
         cmap_destroy(&dev->hw_info.hw_flows);
         dev->netdev_class->dealloc(dev);
         ovs_mutex_unlock(&netdev_mutex);
@@ -2193,4 +2195,14 @@ netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
 
 void netdev_set_probe(struct netdev *netdev) {
     netdev->probe = true;
+}
+
+void netdev_set_args(struct netdev *netdev, const char *key, const char *value)
+{
+   smap_add(&netdev->args, key, value);
+}
+
+const char* netdev_get_args(struct netdev *netdev, const char *key)
+{
+    return smap_get(&netdev->args, key);
 }
