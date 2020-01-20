@@ -1,5 +1,4 @@
 #!/bin/bash
-#!/bin/sh
 
 export LC_ALL=C
 

@@ -805,6 +805,14 @@ static int ndu_rv_pause_run(struct ndu_rv_pause_ctx *ctx)
     if (!ctx->udpif) {
         ctx->udpif = ndu_get_dp_udpif();
     }
+    /* we cannot directly use udpif_stop_threads, since it
+     * will purge all the flows, force ovs to stop forwarding
+     * ptks
+     */
+    /* we also cannot disable upcall, since some pkts need
+     * to goto upcall, i.e. ARP querying gateway's MAC, it
+     * does not have megaflows
+     */
 
     if (ctx->udpif)
         udpif_pause_revalidators(ctx->udpif);
