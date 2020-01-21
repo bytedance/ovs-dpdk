@@ -51,12 +51,6 @@ struct netdev {
      * opening this device, and therefore got assigned to the "system" class */
     bool auto_classified;
 
-    /* this netdev is pre-probed and installed in the shash, normally it's
-     * used for dpdk pre-probed dev for shorten the network down time during
-     * the non-distruptive-update process.
-     */
-    bool probe;
-
     /* custom args. Currently only used for non-distruptive-update process */
     struct smap args;
 

@@ -401,9 +401,6 @@ netdev_open(const char *name, const char *type, struct netdev **netdevp)
             }
 
             netdev = NULL;
-        } else if (netdev->probe) {
-            netdev_change_seq_changed(netdev);
-            netdev->probe = false;
         } else {
             error = EEXIST;
         }
@@ -2191,10 +2188,6 @@ netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
             custom_stats->size = 0;
         }
     }
-}
-
-void netdev_set_probe(struct netdev *netdev) {
-    netdev->probe = true;
 }
 
 void netdev_set_args(struct netdev *netdev, const char *key, const char *value)

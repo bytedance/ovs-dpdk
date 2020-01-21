@@ -985,6 +985,9 @@ static int ndu_fsm_rollback(struct ndu_fsm *fsm)
     /* fall through */
 
     case NDU_STATE_BR_RM_SRV_AND_SNOOP:
+    /* we donot have to add srv and snoop back,
+     * the bridge_reconfigure will do it for us
+     */
         fsm->state = NDU_STATE_OVSDB_UNLOCK;
     /* fall through */
 
@@ -1614,7 +1617,6 @@ int ndu_client_before_stage2(void)
                     intf = ovsrec_interface_next(intf);
                     continue;
                 }
-                netdev_set_probe(netdev);
                 err = netdev_set_config(netdev, &intf->options, &err_str);
                 if (err) {
                     VLOG_ERR("netdev set config err: %s\n", err_str);
