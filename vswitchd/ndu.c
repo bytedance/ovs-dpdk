@@ -245,6 +245,7 @@ static int ndu_flow_conn_recv_run(struct ndu_flow_server *ndu_flow,
     if (mflow) {
         ndu_flow->flows_recv++;
         ovs_list_push_back(head, &mflow->list);
+        return EAGAIN;
     }
     return err;
 }
@@ -445,7 +446,6 @@ static char *state_name[] = {
         [NDU_STATE_BR_RM_SRV_AND_SNOOP] = "br_service_and_snoop",
         [NDU_STATE_PID_FILE] = "pid_file",
         [NDU_STATE_FLOW_SYNC] = "flow_sync",
-        [NDU_STATE_FLOW_RESTORE_WAIT] = "flow_restore_wait",
         [NDU_STATE_STAGE1_FINISH] = "stage1",
         [NDU_STATE_DATAPATH_RELEASE] = "dp_off",
         [NDU_STATE_DONE] = "done",
@@ -909,7 +909,14 @@ static int ndu_flow_sync_connect_and_run(struct ndu_flow_sync_ctx *ctx)
     return err;
 }
 
-static int64_t ndu_client_get_cur_cfg(void);
+#if 0
+static int64_t ndu_client_get_cur_cfg(void)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_first(client.idl);
+    return cfg->cur_cfg;
+}
+
 static int __ndu_set_flow_restore_wait(bool set, int64_t *next_cfg)
 {
     struct ovsdb_idl *idl =
@@ -963,17 +970,13 @@ static int ndu_clear_flow_restore_wait(int64_t *next_cfg)
 {
     return __ndu_set_flow_restore_wait(false, next_cfg);
 }
+#endif
 
 static int ndu_fsm_rollback(struct ndu_fsm *fsm)
 {
     int err;
     switch (fsm->state) {
     case NDU_STATE_STAGE1_FINISH:
-        fsm->state = NDU_STATE_FLOW_RESTORE_WAIT;
-    /* fall through */
-
-    case NDU_STATE_FLOW_RESTORE_WAIT:
-        ndu_clear_flow_restore_wait(NULL);
         fsm->state = NDU_STATE_PID_FILE;
     /* fall through */
 
@@ -1089,15 +1092,9 @@ static int ndu_fsm_run_stage1(struct ndu_fsm *fsm)
         err = ndu_flow_sync_connect_and_run(&fsm->ctx.flow_ctx);
         if (!err) {
             VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
-            fsm->state = NDU_STATE_FLOW_RESTORE_WAIT;
-        }
-        break;
-
-    case NDU_STATE_FLOW_RESTORE_WAIT:
-        ndu_set_flow_restore_wait(NULL);
-        VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
-        fsm->state = NDU_STATE_STAGE1_FINISH;
-    /* fall through */
+            fsm->state = NDU_STATE_STAGE1_FINISH;
+        } else
+            break;
 
     case NDU_STATE_STAGE1_FINISH:
         ndu_flow_trans_destroy(&fsm->ctx.flow_ctx.trans);
@@ -1382,7 +1379,6 @@ enum {
     NDU_CLIENT_STATE_PROBE_NETDEV,
     NDU_CLIENT_STATE_BEGIN_STAGE2,
     NDU_CLIENT_STATE_WAIT_NETDEV_DONE,
-    NDU_CLIENT_STATE_FLOW_RESTORE_WAIT,
     NDU_CLIENT_STATE_FLOW_INSTALL,
     NDU_CLIENT_STATE_RESTORE_HWOFF,
     NDU_CLIENT_STATE_STAGE1_DONE,
@@ -1466,7 +1462,7 @@ int ndu_connect_and_stage1(long int pid)
 
     ndu_flow_server_create(&client.ndu_flow);
 
-    struct jsonrpc_msg *reply;
+    struct jsonrpc_msg *reply = NULL;
     struct jsonrpc_msg *request;
 
     struct json *params;
@@ -1486,16 +1482,21 @@ int ndu_connect_and_stage1(long int pid)
     }
 
     for (;;) {
-        jsonrpc_recv(rpc, &reply);
-        if (reply || jsonrpc_get_status(rpc))
-            break;
-        jsonrpc_run(rpc);
+        if (!reply) {
+            jsonrpc_recv(rpc, &reply);
+            if ((error = jsonrpc_get_status(rpc)))
+                break;
+            jsonrpc_run(rpc);
+            jsonrpc_wait(rpc);
+            jsonrpc_recv_wait(rpc);
+        }
+
         error = ndu_flow_server_run(&client.ndu_flow);
         if (error && error != EAGAIN)
             break;
 
-        jsonrpc_wait(rpc);
-        jsonrpc_recv_wait(rpc);
+        if (!error && reply)
+            break;
         ndu_flow_server_wait(&client.ndu_flow);
         poll_block();
     }
@@ -1570,13 +1571,6 @@ static int ndu_install_flows(struct ndu_flow_server *ndu_flow)
     }
     dpif_close(dpif);
     return 0;
-}
-
-static int64_t ndu_client_get_cur_cfg(void)
-{
-    const struct ovsrec_open_vswitch *cfg =
-        ovsrec_open_vswitch_first(client.idl);
-    return cfg->cur_cfg;
 }
 
 int ndu_client_before_stage2(void)
@@ -1662,21 +1656,9 @@ int ndu_client_before_stage2(void)
         jsonrpc_msg_destroy(reply);
 
         VLOG_INFO("client stage1: sent stage2 commands\n");
-        client.state = NDU_CLIENT_STATE_RESTORE_HWOFF;
+        client.state = NDU_CLIENT_STATE_WAIT_NETDEV_DONE;
         /* exit to let main loop to call bridge_reconfigure */
         return 0;
-
-    case NDU_CLIENT_STATE_RESTORE_HWOFF:
-        err = ndu_hwol_off_rollback(&client.ctx.hwoff_ctx);
-        if (err && err != EAGAIN) {
-            VLOG_ERR("fail to restore hw-offload\n");
-        } else if (err == EAGAIN) {
-            /* even EAGAIN, we should not block main loop */
-            return 0;
-        } else
-            VLOG_INFO("client stage2: restore hwoff complete\n");
-        client.state = NDU_CLIENT_STATE_WAIT_NETDEV_DONE;
-    /* fall through */
 
     case NDU_CLIENT_STATE_WAIT_NETDEV_DONE:
         SHASH_FOR_EACH_SAFE(node, node_next, &client.probe_netdevs)
@@ -1696,22 +1678,26 @@ int ndu_client_before_stage2(void)
 
         VLOG_INFO("client stage2: ofproto netdev probe complete\n");
         shash_destroy_free_data(&client.probe_netdevs);
-        client.state = NDU_CLIENT_STATE_FLOW_RESTORE_WAIT;
-    /*fall through */
-
-    case NDU_CLIENT_STATE_FLOW_RESTORE_WAIT:
-        ndu_clear_flow_restore_wait(&client.next_cfg);
-        VLOG_INFO("client stage2: ndu flow restore cleared\n");
         client.state = NDU_CLIENT_STATE_FLOW_INSTALL;
     /*fall through */
 
     case NDU_CLIENT_STATE_FLOW_INSTALL:
-        if (ndu_client_get_cur_cfg() < client.next_cfg)
-            return 0;
         ndu_install_flows(&client.ndu_flow);
-        VLOG_INFO("client stage2: ndu install flows\n");
-        client.state = NDU_CLIENT_STATE_STAGE1_DONE;
+        VLOG_INFO("client stage2: ndu install flows %d\n", client.ndu_flow.flows_recv);
+        client.state = NDU_CLIENT_STATE_RESTORE_HWOFF;
     /*fall through */
+
+    case NDU_CLIENT_STATE_RESTORE_HWOFF:
+        err = ndu_hwol_off_rollback(&client.ctx.hwoff_ctx);
+        if (err && err != EAGAIN) {
+            VLOG_ERR("fail to restore hw-offload\n");
+        } else if (err == EAGAIN) {
+            /* even EAGAIN, we should not block main loop */
+            return 0;
+        } else
+            VLOG_INFO("client stage2: restore hwoff complete\n");
+        client.state = NDU_CLIENT_STATE_STAGE1_DONE;
+    /* fall through */
 
     case NDU_CLIENT_STATE_STAGE1_DONE:
         if (client.rpc) {
