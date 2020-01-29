@@ -14,6 +14,7 @@
 #include "lib/smap.h"
 #include "lib/vswitch-idl.h"
 #include "lib/netdev.h"
+#include "lib/netdev-linux.h"
 #include "ofproto/ofproto-dpif-upcall.h"
 #include "ofproto/ofproto-dpif.h"
 #include "openvswitch/json.h"
@@ -24,6 +25,7 @@
 #include "lib/ovsdb-idl.h"
 #include "lib/stream-provider.h"
 #include "lib/stream.h"
+#include "lib/stream-fd.h"
 #include "util.h"
 #include "lib/fatal-signal.h"
 #include "lib/ovs-numa.h"
@@ -31,8 +33,37 @@
 #include "lib/daemon-private.h"
 #include "lib/dpif.h"
 #include "odp-netlink.h"
+#include <net/if.h>
 
 VLOG_DEFINE_THIS_MODULE(ndu);
+
+/* ndu data server, used for data syncing */
+struct ndu_data_server {
+    struct pstream *listener;
+    char *unix_path;
+    struct stream *c;
+};
+
+static void ndu_data_server_create(struct ndu_data_server *ndu_data)
+{
+    long int pid = getpid();
+    int error;
+    char *unix_path =
+        xasprintf("punix:%s/%s.%ld", ovs_rundir(), "ndu_data", pid);
+    error = pstream_open(unix_path, &ndu_data->listener, 0);
+    if (error) {
+        VLOG_FATAL("fail to create ndu_data server: %s\n", ovs_strerror(error));
+    }
+    ndu_data->unix_path = unix_path;
+}
+
+static void ndu_data_server_destroy(struct ndu_data_server *ndu_data)
+{
+    pstream_close(ndu_data->listener);
+    remove(ndu_data->unix_path);
+    free(ndu_data->unix_path);
+}
+
 /* ndu_flow functions for old/new OVS flow syncing */
 #define NDU_FLOW_MAX 50
 #define NDU_FLOW_FAMILY 42
@@ -56,7 +87,6 @@ struct ndu_flow_conn {
 struct ndu_flow_server {
     struct pstream *listener;
     struct ndu_flow_conn *conn;
-    char *unix_path;
     struct ovs_list megaflows;
     int flows_recv;
 };
@@ -89,17 +119,10 @@ static void ndu_flow_msg_clear(struct ndu_flow_msg *msg)
     ofpbuf_clear(msg->buf);
 }
 
-static void ndu_flow_server_create(struct ndu_flow_server *ndu_flow)
+static void ndu_flow_server_create(struct ndu_flow_server *ndu_flow,
+                                   struct ndu_data_server *s)
 {
-    long int pid = getpid();
-    int error;
-    char *unix_path =
-        xasprintf("punix:%s/%s.%ld", ovs_rundir(), "ndu_flow", pid);
-    error = pstream_open(unix_path, &ndu_flow->listener, 0);
-    if (error) {
-        VLOG_FATAL("fail to create ndu_flow server: %s\n", ovs_strerror(error));
-    }
-    ndu_flow->unix_path = unix_path;
+    ndu_flow->listener = s->listener;
     ovs_list_init(&ndu_flow->megaflows);
 }
 
@@ -124,9 +147,6 @@ static void ndu_flow_server_destroy(struct ndu_flow_server *ndu_flow)
     if (ndu_flow->conn) {
         ndu_flow_conn_destroy(ndu_flow->conn);
     }
-    pstream_close(ndu_flow->listener);
-    remove(ndu_flow->unix_path);
-    free(ndu_flow->unix_path);
 
     struct ndu_megaflow *f, *n;
     LIST_FOR_EACH_SAFE(f, n, list, &ndu_flow->megaflows)
@@ -139,7 +159,10 @@ static void ndu_flow_server_destroy(struct ndu_flow_server *ndu_flow)
 }
 
 /* extend to ovs_flow_attr to including pmd_id */
-enum ndu_flow_attr { NDU_FLOW_ATTR_PMD_ID = __OVS_FLOW_ATTR_MAX };
+enum ndu_flow_attr {
+    NDU_FLOW_ATTR_PMD_ID = __OVS_FLOW_ATTR_MAX,
+    __NDU_FLOW_ATTR_MAX
+};
 
 static int ndu_flow_parse(struct ofpbuf *buf, struct ndu_megaflow **_mflow)
 {
@@ -236,14 +259,12 @@ static int ndu_flow_conn_recv(struct stream *c, struct ndu_flow_msg *msg,
     return err;
 }
 
-static int ndu_flow_conn_recv_run(struct ndu_flow_server *ndu_flow,
-                                  struct ndu_flow_conn *conn,
+static int ndu_flow_conn_recv_run(struct ndu_flow_conn *conn,
                                   struct ovs_list *head)
 {
     struct ndu_megaflow *mflow;
     int err = ndu_flow_conn_recv(conn->c, &conn->msg, &mflow);
     if (mflow) {
-        ndu_flow->flows_recv++;
         ovs_list_push_back(head, &mflow->list);
         return EAGAIN;
     }
@@ -265,8 +286,10 @@ static int ndu_flow_server_run(struct ndu_flow_server *ndu_flow)
             VLOG_WARN("ndu_flow accept error\n");
         }
     } else {
-        error = ndu_flow_conn_recv_run(ndu_flow, ndu_flow->conn,
-                                       &ndu_flow->megaflows);
+        error = ndu_flow_conn_recv_run(ndu_flow->conn, &ndu_flow->megaflows);
+        if (error == EAGAIN) {
+            ndu_flow->flows_recv++;
+        }
     }
     return error;
 }
@@ -321,12 +344,12 @@ static void ndu_flow_msg_batch_uninit(struct ndu_flow_msg_batch *batch)
 static int ndu_flow_connect(struct ndu_flow_trans *trans, long int pid)
 {
     char *unix_path =
-        xasprintf("unix:%s/%s.%ld", ovs_rundir(), "ndu_flow", pid);
+        xasprintf("unix:%s/%s.%ld", ovs_rundir(), "ndu_data", pid);
     struct stream *c;
     int err;
     err = stream_open(unix_path, &c, 0);
     if (err) {
-        VLOG_ERR("fail to connect ndu_flow server: %s\n", unix_path);
+        VLOG_ERR("fail to connect ndu_data server: %s\n", unix_path);
         goto stream_err;
     }
 
@@ -364,9 +387,12 @@ stream_err:
 
 static void ndu_flow_trans_destroy(struct ndu_flow_trans *trans)
 {
-    dpif_flow_dump_thread_destroy(trans->dump_thread);
-    dpif_flow_dump_destroy(trans->dump);
-    dpif_close(trans->dpif);
+    if (trans->dump_thread)
+        dpif_flow_dump_thread_destroy(trans->dump_thread);
+    if (trans->dump)
+        dpif_flow_dump_destroy(trans->dump);
+    if (trans->dpif)
+        dpif_close(trans->dpif);
 
     ndu_flow_msg_batch_uninit(&trans->batch);
     if (trans->c)
@@ -435,7 +461,347 @@ static int ndu_flow_trans_run(struct ndu_flow_trans *trans)
 
 static void ndu_flow_trans_wait(struct ndu_flow_trans *trans)
 {
-    stream_send_wait(trans->c);
+    if (trans->c)
+        stream_send_wait(trans->c);
+}
+
+/* ndu fd sync server */
+
+struct ndu_tap_fd {
+    char name[IF_NAMESIZE];
+    int fd;
+    struct ovs_list list;
+};
+
+struct ndu_sync_port_attr {
+    char name[IF_NAMESIZE];
+    char type[IF_NAMESIZE];
+    odp_port_t portno;
+};
+
+struct ndu_sync_port {
+    struct ndu_sync_port_attr attr;
+    struct ovs_list list;
+};
+
+struct ndu_sync_server {
+    struct pstream *listener;
+    struct stream *c;
+    struct ofpbuf *buf;
+    struct ovs_list fd_list;
+    struct ovs_list portno_list;
+};
+
+static void ndu_sync_server_create(struct ndu_sync_server *s,
+                                   struct ndu_data_server *server)
+{
+    s->listener = server->listener;
+    s->buf = ofpbuf_new(1024);
+    ovs_list_init(&s->fd_list);
+    ovs_list_init(&s->portno_list);
+}
+
+enum { NDU_SYNC_PORT_ATTR = __NDU_FLOW_ATTR_MAX };
+
+static int ndu_sync_parse(struct ndu_sync_server *s, struct ofpbuf *buf)
+{
+    struct nlattr *nla;
+    size_t left;
+    struct ndu_tap_fd *tap_fd;
+    struct ndu_sync_port *port;
+    const struct ndu_sync_port_attr *attr;
+
+    NL_ATTR_FOR_EACH(nla, left, ofpbuf_at(buf, 0, 0), buf->size)
+    {
+        uint16_t type = nl_attr_type(nla);
+        switch (type) {
+        case NL_A_STRING:
+            tap_fd = xmalloc(sizeof(*tap_fd));
+            ovs_strzcpy(tap_fd->name, nl_attr_get_string(nla), IF_NAMESIZE);
+            ovs_list_init(&tap_fd->list);
+            ovs_list_push_back(&s->fd_list, &tap_fd->list);
+            break;
+        case NDU_SYNC_PORT_ATTR:
+            attr = nl_attr_get(nla);
+            port = xmalloc(sizeof(*port));
+            memcpy(&port->attr, attr, sizeof(*attr));
+            ovs_list_init(&port->list);
+            ovs_list_push_back(&s->portno_list, &port->list);
+            break;
+        default:
+            return EINVAL;
+        }
+    }
+    return 0;
+}
+
+static int ndu_sync_recv(struct ndu_sync_server *s)
+{
+    int fd = stream_fd_get(s->c);
+    struct ofpbuf *buf = s->buf;
+    struct iovec iov = {.iov_base = buf->base, .iov_len = buf->allocated};
+    uint8_t msgctrl[CMSG_SPACE(sizeof(int) * 8)];
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = msgctrl;
+    msg.msg_controllen = sizeof msgctrl;
+    int retval;
+    int error = 0;
+    struct cmsghdr *cmsg;
+    int *ptr;
+
+    do {
+        retval = recvmsg(fd, &msg, 0);
+        if (retval < 0)
+            error = errno;
+    } while (error == EINTR);
+
+    if (error == EAGAIN || error == EWOULDBLOCK)
+        return EAGAIN;
+    if (error)
+        return error;
+
+    buf->size += retval;
+    error = ndu_sync_parse(s, buf);
+    if (error) {
+        return error;
+    }
+
+    struct ndu_tap_fd *tap_fd, *next;
+
+    cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        error = EINVAL;
+        goto err;
+    }
+
+    int fds;
+    fds = (cmsg->cmsg_len - CMSG_ALIGN(sizeof(struct cmsghdr))) / sizeof(int);
+    if (fds != ovs_list_size(&s->fd_list)) {
+        error = EINVAL;
+        goto err;
+    }
+
+    int i = 0;
+    ptr = ALIGNED_CAST(int *, CMSG_DATA(cmsg));
+    LIST_FOR_EACH(tap_fd, list, &s->fd_list)
+    {
+        tap_fd->fd = ptr[i];
+        i++;
+    }
+    return 0;
+
+err:
+    LIST_FOR_EACH_SAFE(tap_fd, next, list, &s->fd_list) { free(tap_fd); }
+    struct ndu_sync_port *port, *pnext;
+    LIST_FOR_EACH_SAFE(port, pnext, list, &s->portno_list) { free(port); }
+    return error;
+}
+
+static int ndu_sync_server_run(struct ndu_sync_server *s)
+{
+    struct stream *c;
+    int error;
+    if (!s->c) {
+        error = pstream_accept(s->listener, &c);
+        if (!error) {
+            s->c = c;
+            VLOG_INFO("got fd syncing conn, begin to recv\n");
+            /* set to EAGAIN to keep recv conn */
+            error = EAGAIN;
+        } else if (error != EAGAIN) {
+            VLOG_WARN("ndu_sync accept error\n");
+        }
+    } else {
+        error = ndu_sync_recv(s);
+    }
+    return error;
+}
+
+static void ndu_sync_server_wait(struct ndu_sync_server *s)
+{
+    if (s->c)
+        stream_recv_wait(s->c);
+    else
+        pstream_wait(s->listener);
+}
+
+static void ndu_sync_server_destroy(struct ndu_sync_server *s)
+{
+    struct ndu_tap_fd *tap_fd, *next;
+    LIST_FOR_EACH_SAFE(tap_fd, next, list, &s->fd_list) { free(tap_fd); }
+    struct ndu_sync_port *port, *pnext;
+    LIST_FOR_EACH_SAFE(port, pnext, list, &s->portno_list) { free(port); }
+    stream_close(s->c);
+    ofpbuf_uninit(s->buf);
+    memset(s, 0, sizeof(*s));
+    ovs_list_init(&s->fd_list);
+    ovs_list_init(&s->portno_list);
+}
+
+struct ndu_sync_trans {
+    struct stream *c;
+    char *unix_path;
+};
+
+static int ndu_sync_connect(struct ndu_sync_trans *trans, long int pid)
+{
+    char *unix_path =
+        xasprintf("unix:%s/%s.%ld", ovs_rundir(), "ndu_data", pid);
+    struct stream *c;
+    int err;
+    err = stream_open(unix_path, &c, 0);
+    if (err) {
+        VLOG_ERR("fail to connect ndu_data server: %s\n", unix_path);
+        return err;
+    }
+
+    trans->c = c;
+    trans->unix_path = unix_path;
+    return err;
+}
+
+static int ndu_sync_trans_run(struct ndu_sync_trans *trans)
+{
+    struct dpif_port_dump dump;
+    struct dpif_port dpif_port;
+    struct ofpbuf *buf = ofpbuf_new(1024);
+
+    struct dpif *dpif;
+    int error = dpif_open("ovs-netdev", "netdev", &dpif);
+    if (error) {
+        goto err;
+    }
+
+    struct iovec iov = {.iov_base = buf->base};
+    struct msghdr msg;
+    uint8_t msgctrl[CMSG_SPACE(sizeof(int) * 8)];
+    memset(&msg, 0, sizeof(msg));
+
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = msgctrl;
+    msg.msg_controllen = sizeof msgctrl;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    int *ptr;
+    int i = 0;
+    ptr = ALIGNED_CAST(int *, CMSG_DATA(cmsg));
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+
+    struct ndu_sync_port_attr attr;
+    DPIF_PORT_FOR_EACH(&dpif_port, &dump, dpif)
+    {
+        if (!strcmp(dpif_port.type, "tap")) {
+            nl_msg_put_string(buf, NL_A_STRING, dpif_port.name);
+            struct netdev *n;
+            error = netdev_open(dpif_port.name, dpif_port.type, &n);
+            if (error) {
+                goto err;
+            }
+            ptr[i++] = netdev_get_tap_fd(n);
+            netdev_close(n);
+        }
+        ovs_strzcpy(attr.name, dpif_port.name, IF_NAMESIZE);
+        ovs_strzcpy(attr.type, dpif_port.type, IF_NAMESIZE);
+        attr.portno = dpif_port.port_no;
+        nl_msg_put_unspec(buf, NDU_SYNC_PORT_ATTR, &attr, sizeof(attr));
+    }
+    iov.iov_len = buf->size;
+    if (i) {
+        msg.msg_controllen = CMSG_SPACE(sizeof(int) * i);
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int) * i);
+    } else {
+        msg.msg_controllen = 0;
+        msg.msg_control = NULL;
+    }
+
+    int fd = stream_fd_get(trans->c);
+    int retval;
+
+    do {
+        retval = sendmsg(fd, &msg, 0);
+        if (retval < 0)
+            error = errno;
+    } while (error == EINTR);
+
+    if (error == EAGAIN || error == EWOULDBLOCK) {
+        error = EAGAIN;
+        goto err;
+    }
+
+err:
+    ofpbuf_uninit(buf);
+    return error;
+}
+
+static void ndu_sync_trans_destroy(struct ndu_sync_trans *trans)
+{
+    free(trans->unix_path);
+    if (trans->c)
+        stream_close(trans->c);
+    trans->c = NULL;
+    trans->unix_path = NULL;
+}
+
+struct ndu_cmd_server {
+    struct pstream *listener;
+    struct stream *c;
+    bool start2;
+};
+
+static void ndu_cmd_server_create(struct ndu_cmd_server *s,
+                                  struct ndu_data_server *server)
+{
+    s->listener = server->listener;
+}
+
+static int ndu_cmd_recv(struct ndu_cmd_server *s)
+{
+    int startcode;
+    int retval;
+    retval = stream_recv(s->c, &startcode, 4);
+    if (retval < 0) {
+        return -retval;
+    }
+
+    if (startcode == 0x20200129) {
+        s->start2 = true;
+    }
+    stream_close(s->c);
+    s->c = NULL;
+    return 0;
+}
+
+static int ndu_cmd_server_run(struct ndu_cmd_server *s)
+{
+    struct stream *c;
+    int error;
+    if (!s->c) {
+        error = pstream_accept(s->listener, &c);
+        if (!error) {
+            s->c = c;
+            VLOG_INFO("got cmd conn, begin to recv\n");
+            /* set to EAGAIN to keep recv conn */
+            error = EAGAIN;
+        } else if (error != EAGAIN) {
+            VLOG_WARN("ndu_sync accept error\n");
+        }
+    } else {
+        error = ndu_cmd_recv(s);
+    }
+    return error;
+}
+
+static void ndu_cmd_server_wait(struct ndu_cmd_server *s)
+{
+    if (!s->c) {
+        pstream_wait(s->listener);
+    } else {
+        stream_recv_wait(s->c);
+    }
 }
 
 static char *state_name[] = {
@@ -445,10 +811,17 @@ static char *state_name[] = {
         [NDU_STATE_OVSDB_UNLOCK] = "ovsdb_unlock",
         [NDU_STATE_BR_RM_SRV_AND_SNOOP] = "br_service_and_snoop",
         [NDU_STATE_PID_FILE] = "pid_file",
+        [NDU_STATE_SYNC] = "sync",
         [NDU_STATE_FLOW_SYNC] = "flow_sync",
+        [NDU_STATE_PMD_PAUSE] = "pmd_pause",
         [NDU_STATE_STAGE1_FINISH] = "stage1",
         [NDU_STATE_DATAPATH_RELEASE] = "dp_off",
         [NDU_STATE_DONE] = "done",
+};
+
+struct ndu_sync_trans_ctx {
+    struct ndu_sync_trans trans;
+    long int pid;
 };
 
 struct ndu_flow_sync_ctx {
@@ -484,6 +857,7 @@ struct ndu_fsm {
         struct ndu_ovsdb_unlock_ctx db_unlock_ctx;
         struct ndu_pid_file_ctx pid_ctx;
         struct ndu_flow_sync_ctx flow_ctx;
+        struct ndu_sync_trans_ctx sync_ctx;
     } ctx;
 };
 
@@ -909,15 +1283,21 @@ static int ndu_flow_sync_connect_and_run(struct ndu_flow_sync_ctx *ctx)
     return err;
 }
 
-#if 0
-static int64_t ndu_client_get_cur_cfg(void)
+static int ndu_sync_trans_connect_and_run(struct ndu_sync_trans_ctx *ctx)
 {
-    const struct ovsrec_open_vswitch *cfg =
-        ovsrec_open_vswitch_first(client.idl);
-    return cfg->cur_cfg;
+    int err;
+    if (!ctx->trans.c) {
+        err = ndu_sync_connect(&ctx->trans, ctx->pid);
+        if (err)
+            return EAGAIN;
+    }
+    err = ndu_sync_trans_run(&ctx->trans);
+    return err;
 }
 
-static int __ndu_set_flow_restore_wait(bool set, int64_t *next_cfg)
+static int64_t ndu_client_get_cur_cfg(void);
+
+static int __ndu_set_pmd_pause(bool set, int64_t *next_cfg)
 {
     struct ovsdb_idl *idl =
         ovsdb_idl_create(ndu_ctx.remote, &ovsrec_idl_class, false, true);
@@ -933,14 +1313,12 @@ static int __ndu_set_flow_restore_wait(bool set, int64_t *next_cfg)
         if (txn) {
             const struct ovsrec_open_vswitch *cfg =
                 ovsrec_open_vswitch_first(idl);
-            curr =
-                smap_get_bool(&cfg->other_config, "flow-restore-wait", false);
+            curr = smap_get_bool(&cfg->other_config, "pmd-pause", false);
             if (curr != set) {
                 struct smap _new;
                 smap_init(&_new);
                 smap_clone(&_new, &cfg->other_config);
-                smap_replace(&_new, "flow-restore-wait",
-                             set ? "true" : "false");
+                smap_replace(&_new, "pmd-pause", set ? "true" : "false");
                 ovsrec_open_vswitch_set_other_config(cfg, &_new);
                 smap_destroy(&_new);
             }
@@ -961,22 +1339,38 @@ static int __ndu_set_flow_restore_wait(bool set, int64_t *next_cfg)
     return 0;
 }
 
-static int ndu_set_flow_restore_wait(int64_t *next_cfg)
+static int ndu_set_pmd_pause(int64_t *next_cfg)
 {
-    return __ndu_set_flow_restore_wait(true, next_cfg);
+    return __ndu_set_pmd_pause(true, next_cfg);
 }
 
-static int ndu_clear_flow_restore_wait(int64_t *next_cfg)
+static int ndu_clear_pmd_pause(int64_t *next_cfg)
 {
-    return __ndu_set_flow_restore_wait(false, next_cfg);
+    return __ndu_set_pmd_pause(false, next_cfg);
 }
-#endif
 
 static int ndu_fsm_rollback(struct ndu_fsm *fsm)
 {
     int err;
     switch (fsm->state) {
     case NDU_STATE_STAGE1_FINISH:
+        fsm->state = NDU_STATE_PMD_PAUSE;
+    /* fall through */
+
+    case NDU_STATE_PMD_PAUSE:
+        err = ndu_clear_pmd_pause(NULL);
+        if (err)
+            goto err;
+        fsm->state = NDU_STATE_FLOW_SYNC;
+    /* fall through */
+
+    case NDU_STATE_FLOW_SYNC:
+        ndu_flow_trans_destroy(&fsm->ctx.flow_ctx.trans);
+        fsm->state = NDU_STATE_SYNC;
+    /* fall through */
+
+    case NDU_STATE_SYNC:
+        ndu_sync_trans_destroy(&fsm->ctx.sync_ctx.trans);
         fsm->state = NDU_STATE_PID_FILE;
     /* fall through */
 
@@ -988,9 +1382,9 @@ static int ndu_fsm_rollback(struct ndu_fsm *fsm)
     /* fall through */
 
     case NDU_STATE_BR_RM_SRV_AND_SNOOP:
-    /* we donot have to add srv and snoop back,
-     * the bridge_reconfigure will do it for us
-     */
+        /* we donot have to add srv and snoop back,
+         * the bridge_reconfigure will do it for us
+         */
         fsm->state = NDU_STATE_OVSDB_UNLOCK;
     /* fall through */
 
@@ -1084,20 +1478,37 @@ static int ndu_fsm_run_stage1(struct ndu_fsm *fsm)
         err = ndu_pid_file_run(&fsm->ctx.pid_ctx);
         if (!err) {
             VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
-            fsm->state = NDU_STATE_FLOW_SYNC;
+            fsm->state = NDU_STATE_SYNC;
         }
     /* fall through */
+
+    case NDU_STATE_SYNC:
+        err = ndu_sync_trans_connect_and_run(&fsm->ctx.sync_ctx);
+        if (!err) {
+            VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
+            fsm->state = NDU_STATE_FLOW_SYNC;
+        } else
+            break;
 
     case NDU_STATE_FLOW_SYNC:
         err = ndu_flow_sync_connect_and_run(&fsm->ctx.flow_ctx);
         if (!err) {
             VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
-            fsm->state = NDU_STATE_STAGE1_FINISH;
+            fsm->state = NDU_STATE_PMD_PAUSE;
         } else
             break;
 
+    case NDU_STATE_PMD_PAUSE:
+        err = ndu_set_pmd_pause(NULL);
+        if (!err) {
+            VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
+            fsm->state = NDU_STATE_STAGE1_FINISH;
+        }
+    /* fall through */
+
     case NDU_STATE_STAGE1_FINISH:
         ndu_flow_trans_destroy(&fsm->ctx.flow_ctx.trans);
+        ndu_sync_trans_destroy(&fsm->ctx.sync_ctx.trans);
         VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
         return 0;
 
@@ -1107,6 +1518,7 @@ static int ndu_fsm_run_stage1(struct ndu_fsm *fsm)
     }
 
     if (err && err != EAGAIN) {
+        VLOG_ERR("stage 1: %s failed\n", state_name[fsm->state]);
         fsm->run = ndu_fsm_rollback;
         err = ndu_fsm_rollback(fsm);
         return err;
@@ -1137,6 +1549,9 @@ static void ndu_hwol_off_wait(struct ndu_hwol_off_ctx *ctx)
 static void ndu_fsm_wait(struct ndu_fsm *fsm)
 {
     switch (fsm->state) {
+    case NDU_STATE_IDLE:
+        poll_immediate_wake();
+        break;
     case NDU_STATE_HWOFFLOAD_OFF:
         ndu_hwol_off_wait(&fsm->ctx.hwoff_ctx);
         break;
@@ -1152,10 +1567,15 @@ static void ndu_fsm_wait(struct ndu_fsm *fsm)
     case NDU_STATE_PID_FILE:
         poll_immediate_wake();
         break;
+    case NDU_STATE_SYNC:
+        poll_immediate_wake();
+        break;
     case NDU_STATE_FLOW_SYNC:
         ndu_flow_trans_wait(&fsm->ctx.flow_ctx.trans);
         break;
     case NDU_STATE_STAGE1_FINISH:
+        break;
+    case NDU_STATE_DATAPATH_RELEASE:
         break;
     default:
         break;
@@ -1216,6 +1636,7 @@ static void ndu_handle_stage1_msg(struct jsonrpc_msg *msg,
         struct json *v2 = shash_find_data(h, "new-pid");
         if (v2 && v2->type == JSON_INTEGER) {
             conn->fsm->ctx.flow_ctx.pid = json_integer(v2);
+            conn->fsm->ctx.sync_ctx.pid = json_integer(v2);
         }
     }
 }
@@ -1321,8 +1742,8 @@ void ndu_run(void)
         error = ndu_fsm_go(&ndu_fsm);
         if (error != EAGAIN) {
             if (error) {
-                VLOG_ERR("conn is broken, rollback failed!, abort and \
-                        let the monitor process relaunch ovs\n");
+                VLOG_FATAL("conn is broken, rollback failed!, abort and \
+                            let the monitor process relaunch ovs\n");
             }
             ndu_fsm_clear(&ndu_fsm);
         }
@@ -1344,9 +1765,6 @@ void ndu_run(void)
 static void ndu_client_wait(void);
 void ndu_wait(void)
 {
-    if (!server)
-        return;
-
     if (server->conn) {
         struct ndu_conn *conn = server->conn;
         struct jsonrpc *rpc = conn->rpc;
@@ -1377,11 +1795,12 @@ enum {
     NDU_CLIENT_STATE_IDLE,
     NDU_CLIENT_STATE_SYNC_DB,
     NDU_CLIENT_STATE_PROBE_NETDEV,
-    NDU_CLIENT_STATE_BEGIN_STAGE2,
     NDU_CLIENT_STATE_WAIT_NETDEV_DONE,
     NDU_CLIENT_STATE_FLOW_INSTALL,
+    NDU_CLIENT_STATE_WAIT_STAGE2,
+    NDU_CLIENT_STATE_START_STAGE2,
     NDU_CLIENT_STATE_RESTORE_HWOFF,
-    NDU_CLIENT_STATE_STAGE1_DONE,
+    NDU_CLIENT_STATE_STAGE2_DONE,
 };
 
 struct ndu_client_restore_state {
@@ -1394,7 +1813,10 @@ struct ndu_client {
     struct ovsdb_idl *idl;
     struct shash probe_netdevs;
     struct ndu_client_restore_state ctx;
+    struct ndu_data_server ndu_data;
     struct ndu_flow_server ndu_flow;
+    struct ndu_sync_server ndu_sync;
+    struct ndu_cmd_server ndu_cmd;
     int state;
     int64_t cur_cfg;
     int64_t next_cfg;
@@ -1402,7 +1824,7 @@ struct ndu_client {
 
 struct probe_netdev {
     struct netdev *netdev;
-    unsigned int change_seq;
+    int ref_cnt;
 };
 
 static struct ndu_client client;
@@ -1415,16 +1837,11 @@ static void ndu_client_init(void)
     client.idl_seqno = ovsdb_idl_get_seqno(client.idl);
 }
 
-static int ndu_client_transact_block(struct jsonrpc *rpc, const char *method,
-                                     struct json *params,
-                                     struct jsonrpc_msg **reply)
+static int64_t ndu_client_get_cur_cfg(void)
 {
-    int error;
-    struct jsonrpc_msg *request;
-    request = jsonrpc_create_request(method, params, NULL);
-    error = jsonrpc_transact_block(rpc, request, reply);
-
-    return error;
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_first(client.idl);
+    return cfg->cur_cfg;
 }
 
 static void ndu_client_process_reply(struct jsonrpc_msg *reply)
@@ -1460,7 +1877,10 @@ int ndu_connect_and_stage1(long int pid)
     }
     client.rpc = rpc;
 
-    ndu_flow_server_create(&client.ndu_flow);
+    ndu_data_server_create(&client.ndu_data);
+    ndu_flow_server_create(&client.ndu_flow, &client.ndu_data);
+    ndu_sync_server_create(&client.ndu_sync, &client.ndu_data);
+    ndu_cmd_server_create(&client.ndu_cmd, &client.ndu_data);
 
     struct jsonrpc_msg *reply = NULL;
     struct jsonrpc_msg *request;
@@ -1480,6 +1900,7 @@ int ndu_connect_and_stage1(long int pid)
         client.rpc = NULL;
         return -1;
     }
+    int state = NDU_STATE_SYNC;
 
     for (;;) {
         if (!reply) {
@@ -1491,19 +1912,40 @@ int ndu_connect_and_stage1(long int pid)
             jsonrpc_recv_wait(rpc);
         }
 
-        error = ndu_flow_server_run(&client.ndu_flow);
+        switch (state) {
+        case NDU_STATE_SYNC:
+            error = ndu_sync_server_run(&client.ndu_sync);
+            break;
+        case NDU_STATE_FLOW_SYNC:
+            error = ndu_flow_server_run(&client.ndu_flow);
+            break;
+        }
+
         if (error && error != EAGAIN)
             break;
 
-        if (!error && reply)
+        if (!error && reply && state == NDU_STATE_FLOW_SYNC)
             break;
-        ndu_flow_server_wait(&client.ndu_flow);
+
+        if (!error && state == NDU_STATE_SYNC)
+            state = NDU_STATE_FLOW_SYNC;
+
+        switch (state) {
+        case NDU_STATE_SYNC:
+            ndu_flow_server_wait(&client.ndu_flow);
+            break;
+        case NDU_STATE_FLOW_SYNC:
+            ndu_sync_server_wait(&client.ndu_sync);
+            break;
+        }
         poll_block();
     }
 
     if ((error && error != EAGAIN) || !reply || (reply && reply->error)) {
         jsonrpc_close(rpc);
+        ndu_sync_server_destroy(&client.ndu_sync);
         ndu_flow_server_destroy(&client.ndu_flow);
+        ndu_data_server_destroy(&client.ndu_data);
         client.rpc = NULL;
         VLOG_FATAL("stage1 failed\n");
         return -1;
@@ -1523,32 +1965,6 @@ static void ndu_client_wait(void)
         ndu_hwol_off_wait(&client.ctx.hwoff_ctx);
         break;
     }
-}
-
-static int ndu_client_reconf_netdev(struct netdev *netdev,
-                                    const struct ovsrec_interface *intf)
-{
-    if (intf->n_mtu_request) {
-        netdev_set_mtu(netdev, *intf->mtu_request);
-        VLOG_INFO("netdev %s mtu set to %ld\n", netdev_get_name(netdev),
-                  *intf->mtu_request);
-    }
-    struct ovs_numa_dump *pmd_cores;
-    const char *cmask = smap_get(&intf->other_config, "pmd-cpu-mask");
-
-    if (cmask && cmask[0]) {
-        pmd_cores = ovs_numa_dump_cores_with_cmask(cmask);
-    } else {
-        pmd_cores = ovs_numa_dump_n_cores_per_numa(1);
-    }
-
-    /* add one for NON-PMD-CORES */
-    netdev_set_tx_multiq(netdev, ovs_numa_dump_count(pmd_cores) + 1);
-    VLOG_INFO("netdev %s txq set to %ld\n", netdev_get_name(netdev),
-              ovs_numa_dump_count(pmd_cores) + 1);
-    ovs_numa_dump_destroy(pmd_cores);
-    int err = netdev_reconfigure(netdev);
-    return err;
 }
 
 static int ndu_install_flows(struct ndu_flow_server *ndu_flow)
@@ -1573,14 +1989,29 @@ static int ndu_install_flows(struct ndu_flow_server *ndu_flow)
     return 0;
 }
 
+static int ndu_client_rpc_transact_stage2(void)
+{
+    int error;
+    struct jsonrpc_msg *request, *reply;
+    request = jsonrpc_create_request("stage2", json_array_create_empty(), NULL);
+    error = jsonrpc_transact_block(client.rpc, request, &reply);
+    if (error) {
+        jsonrpc_close(client.rpc);
+        client.rpc = NULL;
+        return error;
+    }
+    jsonrpc_msg_destroy(reply);
+    return error;
+}
+
 int ndu_client_before_stage2(void)
 {
     int err;
-    struct jsonrpc_msg *reply;
     struct shash_node *node, *node_next;
-    const struct ovsrec_interface *intf;
+    struct ndu_tap_fd *tap_fd;
+    struct ndu_sync_port *port;
 
-    if (OVS_LIKELY(client.state == NDU_CLIENT_STATE_STAGE1_DONE ||
+    if (OVS_LIKELY(client.state == NDU_CLIENT_STATE_STAGE2_DONE ||
                    client.state == NDU_CLIENT_STATE_IDLE)) {
         return 0;
     }
@@ -1596,69 +2027,52 @@ int ndu_client_before_stage2(void)
     /* fall through */
 
     case NDU_CLIENT_STATE_PROBE_NETDEV:
-        /* check if any netdev can be preload */
-        intf = ovsrec_interface_first(client.idl);
-        while (intf) {
-            const char *driver_name = smap_get(&intf->status, "driver_name");
-            char *err_str;
-            /* mlnx driver can be shared between multiple processes,
-             * thus, we can preloaded it before new ovs init ofproto
-             */
-            if (driver_name && !strcmp(driver_name, "net_mlx5")) {
-                struct netdev *netdev;
-                err = netdev_open(intf->name, "dpdk", &netdev);
-                if (err) {
-                    intf = ovsrec_interface_next(intf);
-                    continue;
-                }
-                err = netdev_set_config(netdev, &intf->options, &err_str);
-                if (err) {
-                    VLOG_ERR("netdev set config err: %s\n", err_str);
-                    free(err_str);
-                    netdev_remove(netdev);
-                    continue;
-                }
+        LIST_FOR_EACH(tap_fd, list, &client.ndu_sync.fd_list)
+        {
+            struct netdev *netdev;
+            errno = 0;
+            err = netdev_open(tap_fd->name, "tap", &netdev);
+            if (!err && errno == EBUSY) {
+                netdev_set_tap_fd(netdev, tap_fd->fd);
+            } else if (err) {
+                VLOG_ERR("fail to open tap dev: %s\n", tap_fd->name);
+                continue;
+            }
+            VLOG_INFO("set netdev:%s with fd %d\n", netdev_get_name(netdev),
+                      tap_fd->fd);
+            struct probe_netdev *n = xmalloc(sizeof *n);
+            n->netdev = netdev;
+            n->ref_cnt = netdev_get_ref_cnt(netdev);
+            shash_add(&client.probe_netdevs, netdev_get_name(netdev), n);
+        }
 
-                if (netdev_is_reconf_required(netdev)) {
-                    err = ndu_client_reconf_netdev(netdev, intf);
-                    if (err) {
-                        VLOG_ERR("netdev reconfigure err\n");
-                        netdev_remove(netdev);
-                        continue;
-                    }
-                }
-
-                VLOG_INFO("probe netdev:%s done\n", netdev_get_name(netdev));
+        LIST_FOR_EACH(port, list, &client.ndu_sync.portno_list)
+        {
+            struct netdev *netdev;
+            char portno[4];
+            err = netdev_open(port->attr.name, port->attr.type, &netdev);
+            if (err) {
+                VLOG_ERR("fail to open netdev: %s\n", port->attr.name);
+                continue;
+            }
+            snprintf(portno, 4, "%d", port->attr.portno);
+            netdev_set_args(netdev, "odp_port_request", portno);
+            VLOG_INFO("set %s odp_port_request=%d", port->attr.name,
+                      port->attr.portno);
+            if (!strcmp(port->attr.type, "tap")) {
+                netdev_close(netdev);
+            } else {
                 struct probe_netdev *n = xmalloc(sizeof *n);
                 n->netdev = netdev;
-                n->change_seq = netdev_get_change_seq(netdev);
+                n->ref_cnt = netdev_get_ref_cnt(netdev);
                 shash_add(&client.probe_netdevs, netdev_get_name(netdev), n);
             }
-            intf = ovsrec_interface_next(intf);
         }
 
         VLOG_INFO("client stage1: probe netdev complete\n");
-        client.state = NDU_CLIENT_STATE_BEGIN_STAGE2;
-    /* fall through */
-
-    case NDU_CLIENT_STATE_BEGIN_STAGE2:
-
-        err = ndu_client_transact_block(client.rpc, "stage2",
-                                        json_array_create_empty(), &reply);
-        if (err) {
-            VLOG_INFO("client stage1: old ovs ndu rpc close\n");
-            jsonrpc_close(client.rpc);
-            client.rpc = NULL;
-        }
-        /* do not care reply, since at stage2, if old ovs failed, we will
-         * kill it.
-         */
-        jsonrpc_msg_destroy(reply);
-
-        VLOG_INFO("client stage1: sent stage2 commands\n");
         client.state = NDU_CLIENT_STATE_WAIT_NETDEV_DONE;
-        /* exit to let main loop to call bridge_reconfigure */
-        return 0;
+        /* retrun to mainloop, to call bridge_reconfigure */
+        break;
 
     case NDU_CLIENT_STATE_WAIT_NETDEV_DONE:
         SHASH_FOR_EACH_SAFE(node, node_next, &client.probe_netdevs)
@@ -1667,7 +2081,7 @@ int ndu_client_before_stage2(void)
              * dpdk devs, and change seq.
              */
             struct probe_netdev *n = node->data;
-            if (n->change_seq == netdev_get_change_seq(n->netdev)) {
+            if (n->ref_cnt == netdev_get_ref_cnt(n->netdev)) {
                 return 0;
             } else {
                 shash_delete(&client.probe_netdevs, node);
@@ -1676,14 +2090,32 @@ int ndu_client_before_stage2(void)
             }
         }
 
-        VLOG_INFO("client stage2: ofproto netdev probe complete\n");
+        VLOG_INFO("client stage1: ofproto netdev probe complete\n");
         shash_destroy_free_data(&client.probe_netdevs);
+        client.state = NDU_CLIENT_STATE_WAIT_STAGE2;
+    /* fall through */
+
+    case NDU_CLIENT_STATE_WAIT_STAGE2:
+        ndu_cmd_server_run(&client.ndu_cmd);
+        if (client.ndu_cmd.start2 != true) {
+            ndu_cmd_server_wait(&client.ndu_cmd);
+            return 0;
+        }
+        VLOG_INFO("client stage1: ndu recv cmd, start stage2\n");
+        ndu_clear_pmd_pause(NULL);
+        client.state = NDU_CLIENT_STATE_START_STAGE2;
+        break;
+
+    case NDU_CLIENT_STATE_START_STAGE2:
+        ndu_client_rpc_transact_stage2();
+        VLOG_INFO("client stage2: start stage 2\n");
         client.state = NDU_CLIENT_STATE_FLOW_INSTALL;
-    /*fall through */
+    /* fall through */
 
     case NDU_CLIENT_STATE_FLOW_INSTALL:
         ndu_install_flows(&client.ndu_flow);
-        VLOG_INFO("client stage2: ndu install flows %d\n", client.ndu_flow.flows_recv);
+        VLOG_INFO("client stage2: ndu install flows %d\n",
+                  client.ndu_flow.flows_recv);
         client.state = NDU_CLIENT_STATE_RESTORE_HWOFF;
     /*fall through */
 
@@ -1696,15 +2128,17 @@ int ndu_client_before_stage2(void)
             return 0;
         } else
             VLOG_INFO("client stage2: restore hwoff complete\n");
-        client.state = NDU_CLIENT_STATE_STAGE1_DONE;
+        client.state = NDU_CLIENT_STATE_STAGE2_DONE;
     /* fall through */
 
-    case NDU_CLIENT_STATE_STAGE1_DONE:
+    case NDU_CLIENT_STATE_STAGE2_DONE:
         if (client.rpc) {
             jsonrpc_close(client.rpc);
             client.rpc = NULL;
         }
+        ndu_sync_server_destroy(&client.ndu_sync);
         ndu_flow_server_destroy(&client.ndu_flow);
+        ndu_data_server_destroy(&client.ndu_data);
         VLOG_INFO("client stage2: stage2 complete\n");
     }
 

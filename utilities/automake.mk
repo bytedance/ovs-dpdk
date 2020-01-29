@@ -19,7 +19,8 @@ scripts_SCRIPTS += \
 	utilities/ovs-check-dead-ifs \
 	utilities/ovs-ctl \
 	utilities/ovs-kmod-ctl \
-	utilities/ovs-save
+	utilities/ovs-save \
+	utilities/ovs-hotgrade.sh
 scripts_DATA += utilities/ovs-lib
 
 completion_SCRIPTS += \
@@ -51,6 +52,7 @@ EXTRA_DIST += \
 	utilities/ovs-pipegen.py \
 	utilities/ovs-pki.in \
 	utilities/ovs-save \
+	utilities/ovs-hotgrade.sh \
 	utilities/ovs-tcpdump.in \
 	utilities/ovs-tcpundump.in \
 	utilities/ovs-test.in \

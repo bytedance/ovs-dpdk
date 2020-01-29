@@ -2199,3 +2199,8 @@ const char* netdev_get_args(struct netdev *netdev, const char *key)
 {
     return smap_get(&netdev->args, key);
 }
+
+int netdev_get_ref_cnt(struct netdev *netdev)
+{
+    return netdev->ref_cnt;
+}

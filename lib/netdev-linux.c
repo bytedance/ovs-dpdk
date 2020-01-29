@@ -965,8 +965,13 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     if (ioctl(netdev->tap_fd, TUNSETIFF, &ifr) == -1) {
         VLOG_WARN("%s: creating tap device failed: %s", name,
                   ovs_strerror(errno));
-        error = errno;
-        goto error_close;
+        if (errno == EBUSY) {
+            close(netdev->tap_fd);
+            netdev->tap_fd = -1;
+            netdev->present = true;
+            return 0;
+        } else
+            error = errno;
     }
 
     /* Make non-blocking. */
@@ -6198,4 +6203,16 @@ af_packet_sock(void)
     }
 
     return sock;
+}
+
+void netdev_set_tap_fd(struct netdev *netdev_, int fd)
+{
+    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
+    netdev->tap_fd = fd;
+}
+
+int netdev_get_tap_fd(struct netdev *netdev_)
+{
+    struct netdev_linux *netdev = netdev_linux_cast(netdev_);
+    return netdev->tap_fd;
 }

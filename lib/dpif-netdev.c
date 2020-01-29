@@ -578,6 +578,7 @@ struct dp_netdev_pmd_thread {
     atomic_bool wait_for_reload;    /* Can we busy wait for the next reload? */
     atomic_bool reload_tx_qid;      /* Do we need to reload static_tx_qid? */
     atomic_bool exit;               /* For terminating the pmd thread. */
+    atomic_bool pause;              /* For pausing the pmd thread. */
 
     pthread_t thread;
     unsigned core_id;               /* CPU core id of this pmd thread. */
@@ -730,6 +731,8 @@ static void
 flush_offload_flows(struct dp_netdev_pmd_thread *pmd);
 static void
 try_offload_flows(struct dp_netdev_pmd_thread *pmd);
+static void
+reload_affected_pmds(struct dp_netdev *dp);
 
 static void
 emc_cache_init(struct emc_cache *flow_cache)
@@ -3357,6 +3360,30 @@ set_pmd_auto_lb(struct dp_netdev *dp)
 
 }
 
+static void
+dp_netdev_pmd_pause(struct dp_netdev *dp)
+{
+    struct dp_netdev_pmd_thread *pmd;
+
+    CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
+        atomic_store_explicit(&pmd->pause, true, memory_order_release);
+        pmd->need_reload = true;
+    }
+    reload_affected_pmds(dp);
+}
+
+static void
+dp_netdev_pmd_resume(struct dp_netdev *dp)
+{
+    struct dp_netdev_pmd_thread *pmd;
+
+    CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
+        atomic_store_explicit(&pmd->pause, false, memory_order_release);
+        pmd->need_reload = true;
+    }
+    reload_affected_pmds(dp);
+}
+
 /* Applies datapath configuration from the database. Some of the changes are
  * actually applied in dpif_netdev_run(). */
 static int
@@ -3474,6 +3501,12 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
         dp_netdev_offload_restart(dp->dp_flow_offload);
         atomic_store_explicit(&dp->dp_flow_offload->req, true,
                                memory_order_release);
+    }
+
+    if (smap_get_bool(other_config, "pmd-pause", false)) {
+        dp_netdev_pmd_pause(dp);
+    } else {
+        dp_netdev_pmd_resume(dp);
     }
 
     set_pmd_auto_lb(dp);
@@ -5062,6 +5095,7 @@ pmd_thread_main(void *f_)
     bool reload_tx_qid;
     bool exiting;
     bool reload;
+    bool pause = false;
     int poll_cnt;
     int i;
     int process_packets = 0;
@@ -5088,7 +5122,7 @@ reload:
        dp_netdev_rxq_set_cycles(poll_list[i].rxq, RXQ_CYCLES_PROC_CURR, 0);
     }
 
-    if (!poll_cnt) {
+    if (!poll_cnt || pause) {
         if (wait_for_reload) {
             /* Don't sleep, control thread will ask for a reload shortly. */
             do {
@@ -5174,6 +5208,7 @@ reload:
     atomic_read_relaxed(&pmd->wait_for_reload, &wait_for_reload);
     atomic_read_relaxed(&pmd->reload_tx_qid, &reload_tx_qid);
     atomic_read_relaxed(&pmd->exit, &exiting);
+    atomic_read_relaxed(&pmd->pause, &pause);
     /* Signal here to make sure the pmd finishes
      * reloading the updated configuration. */
     dp_netdev_pmd_reload_done(pmd);

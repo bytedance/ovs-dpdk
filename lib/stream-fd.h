@@ -36,4 +36,6 @@ int new_fd_pstream(char *name, int fd,
                    char *unlink_path,
                    struct pstream **pstreamp);
 
+int stream_fd_get(struct stream *stream);
+int pstream_fd_get(struct pstream *pstream);
 #endif /* stream-fd.h */

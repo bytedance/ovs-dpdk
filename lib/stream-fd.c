@@ -292,3 +292,17 @@ maybe_unlink_and_free(char *path)
         free(path);
     }
 }
+
+int
+stream_fd_get(struct stream *stream)
+{
+    struct stream_fd *s = stream_fd_cast(stream);
+    return s->fd;
+}
+
+int
+pstream_fd_get(struct pstream *pstream)
+{
+    struct fd_pstream *l = fd_pstream_cast(pstream);
+    return l->fd;
+}

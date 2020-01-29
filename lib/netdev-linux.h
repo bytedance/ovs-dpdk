@@ -29,4 +29,7 @@ int netdev_linux_ethtool_set_flag(struct netdev *netdev, uint32_t flag,
                                   const char *flag_name, bool enable);
 int linux_get_ifindex(const char *netdev_name);
 
+void netdev_set_tap_fd(struct netdev *netdev, int fd);
+int netdev_get_tap_fd(struct netdev *netdev);
+
 #endif /* netdev-linux.h */

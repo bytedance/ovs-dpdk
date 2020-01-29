@@ -22,14 +22,23 @@ save_flows () {
     done
 }
 
+pid=`pidof ovs-vswitchd`
+if [ -z "$pid" ]; then
+    echo "cannot get ovs-vswitchd pid"
+    exit -1
+fi
+
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 
 # Save flows
 bridges=$(ovs-vsctl -- --real list-br)
 flows=$(save_flows $bridges)
-echo $flows
+#echo $flows
 
 ovs-vswitchd unix:/var/run/openvswitch/db.sock -vconsole:emer -vsyslog:err -vfile:info --mlockall --no-chdir --log-file=/var/log/openvswitch/ovs-vswitchd.log --pidfile=/var/run/openvswitch/ovs-vswitchd.pid --detach --monitor
 
+newpid=`cat /var/run/openvswitch/ovs-vswitchd.pid`
+
 eval "$flows"
+ovs-nductl -p $newpid -m start2
