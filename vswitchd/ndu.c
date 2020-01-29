@@ -804,6 +804,16 @@ static void ndu_cmd_server_wait(struct ndu_cmd_server *s)
     }
 }
 
+static void ndu_cmd_server_destroy(struct ndu_cmd_server *s)
+{
+    s->listener = NULL;
+    if (s->c) {
+        stream_close(s->c);
+        s->c = NULL;
+    }
+    s->start2 = false;
+}
+
 static char *state_name[] = {
         [NDU_STATE_IDLE] = "idle",
         [NDU_STATE_HWOFFLOAD_OFF] = "hwoffload_off",
@@ -1818,8 +1828,6 @@ struct ndu_client {
     struct ndu_sync_server ndu_sync;
     struct ndu_cmd_server ndu_cmd;
     int state;
-    int64_t cur_cfg;
-    int64_t next_cfg;
 };
 
 struct probe_netdev {
@@ -2077,9 +2085,6 @@ int ndu_client_before_stage2(void)
     case NDU_CLIENT_STATE_WAIT_NETDEV_DONE:
         SHASH_FOR_EACH_SAFE(node, node_next, &client.probe_netdevs)
         {
-            /* after ofproto init, the ofproto will create these
-             * dpdk devs, and change seq.
-             */
             struct probe_netdev *n = node->data;
             if (n->ref_cnt == netdev_get_ref_cnt(n->netdev)) {
                 return 0;
@@ -2138,6 +2143,7 @@ int ndu_client_before_stage2(void)
         }
         ndu_sync_server_destroy(&client.ndu_sync);
         ndu_flow_server_destroy(&client.ndu_flow);
+        ndu_cmd_server_destroy(&client.ndu_cmd);
         ndu_data_server_destroy(&client.ndu_data);
         VLOG_INFO("client stage2: stage2 complete\n");
     }

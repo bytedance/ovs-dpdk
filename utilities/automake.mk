@@ -20,7 +20,7 @@ scripts_SCRIPTS += \
 	utilities/ovs-ctl \
 	utilities/ovs-kmod-ctl \
 	utilities/ovs-save \
-	utilities/ovs-hotgrade.sh
+	utilities/ovs-hotupgrade.sh
 scripts_DATA += utilities/ovs-lib
 
 completion_SCRIPTS += \
@@ -52,7 +52,7 @@ EXTRA_DIST += \
 	utilities/ovs-pipegen.py \
 	utilities/ovs-pki.in \
 	utilities/ovs-save \
-	utilities/ovs-hotgrade.sh \
+	utilities/ovs-hotupgrade.sh \
 	utilities/ovs-tcpdump.in \
 	utilities/ovs-tcpundump.in \
 	utilities/ovs-test.in \
