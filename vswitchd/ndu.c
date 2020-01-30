@@ -1806,8 +1806,8 @@ enum {
     NDU_CLIENT_STATE_SYNC_DB,
     NDU_CLIENT_STATE_PROBE_NETDEV,
     NDU_CLIENT_STATE_WAIT_NETDEV_DONE,
-    NDU_CLIENT_STATE_FLOW_INSTALL,
     NDU_CLIENT_STATE_WAIT_STAGE2,
+    NDU_CLIENT_STATE_FLOW_INSTALL,
     NDU_CLIENT_STATE_START_STAGE2,
     NDU_CLIENT_STATE_RESTORE_HWOFF,
     NDU_CLIENT_STATE_STAGE2_DONE,
@@ -2039,13 +2039,10 @@ int ndu_client_before_stage2(void)
         {
             struct netdev *netdev;
             err = netdev_open(tap_fd->name, "tap", &netdev);
-            if (!err) {
-                const char *err_code = netdev_get_args(netdev, "errno");
-                if (err_code && !strcmp(err_code, "EBUSY")) {
-                    netdev_set_tap_fd(netdev, tap_fd->fd);
-                    VLOG_INFO("set netdev:%s with fd %d\n", netdev_get_name(netdev),
-                      tap_fd->fd);
-                }
+            if (!err && netdev_get_tap_fd(netdev) == -EBUSY) {
+                netdev_set_tap_fd(netdev, tap_fd->fd);
+                VLOG_INFO("set netdev:%s with fd %d\n", netdev_get_name(netdev),
+                          tap_fd->fd);
             } else if (err) {
                 VLOG_ERR("fail to open tap dev: %s\n", tap_fd->name);
                 continue;
@@ -2110,19 +2107,20 @@ int ndu_client_before_stage2(void)
         }
         VLOG_INFO("client stage1: ndu recv cmd, start stage2\n");
         ndu_clear_pmd_pause(NULL);
-        client.state = NDU_CLIENT_STATE_START_STAGE2;
-        break;
-
-    case NDU_CLIENT_STATE_START_STAGE2:
-        ndu_client_rpc_transact_stage2();
-        VLOG_INFO("client stage2: start stage 2\n");
         client.state = NDU_CLIENT_STATE_FLOW_INSTALL;
     /* fall through */
 
     case NDU_CLIENT_STATE_FLOW_INSTALL:
         ndu_install_flows(&client.ndu_flow);
-        VLOG_INFO("client stage2: ndu install flows %d\n",
+        VLOG_INFO("client stage1: ndu install flows %d\n",
                   client.ndu_flow.flows_recv);
+        client.state = NDU_CLIENT_STATE_START_STAGE2;
+        /* return to mainloop, start pmd */
+        break;
+
+    case NDU_CLIENT_STATE_START_STAGE2:
+        ndu_client_rpc_transact_stage2();
+        VLOG_INFO("client stage2: start stage 2\n");
         client.state = NDU_CLIENT_STATE_RESTORE_HWOFF;
     /*fall through */
 

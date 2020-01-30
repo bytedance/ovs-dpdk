@@ -965,9 +965,8 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     if (ioctl(netdev->tap_fd, TUNSETIFF, &ifr) == -1) {
         if (errno == EBUSY) {
             close(netdev->tap_fd);
-            netdev->tap_fd = -1;
+            netdev->tap_fd = -EBUSY;
             netdev->present = true;
-            netdev_set_args(netdev_, "errno", "EBUSY");
             return 0;
         } else {
             VLOG_WARN("%s: creating tap device failed: %s", name,
