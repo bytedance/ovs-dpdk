@@ -963,15 +963,17 @@ netdev_linux_construct_tap(struct netdev *netdev_)
     ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
     ovs_strzcpy(ifr.ifr_name, name, sizeof ifr.ifr_name);
     if (ioctl(netdev->tap_fd, TUNSETIFF, &ifr) == -1) {
-        VLOG_WARN("%s: creating tap device failed: %s", name,
-                  ovs_strerror(errno));
         if (errno == EBUSY) {
             close(netdev->tap_fd);
             netdev->tap_fd = -1;
             netdev->present = true;
+            netdev_set_args(netdev_, "errno", "EBUSY");
             return 0;
-        } else
+        } else {
+            VLOG_WARN("%s: creating tap device failed: %s", name,
+                  ovs_strerror(errno));
             error = errno;
+        }
     }
 
     /* Make non-blocking. */

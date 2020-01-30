@@ -1827,7 +1827,10 @@ dpif_netdev_port_add(struct dpif *dpif, struct netdev *netdev,
         port_no = *port_nop;
         error = dp_netdev_lookup_port(dp, *port_nop) ? EBUSY : 0;
     } else {
-        port_no = choose_port(dp, dpif_port);
+        const char *odp_port_request = netdev_get_args(netdev, "odp_port_request");
+        if (!odp_port_request || !str_to_uint(odp_port_request, 10, &port_no)) {
+            port_no = choose_port(dp, dpif_port);
+        }
         error = port_no == ODPP_NONE ? EFBIG : 0;
     }
     if (!error) {

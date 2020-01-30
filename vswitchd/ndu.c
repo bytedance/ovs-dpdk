@@ -2038,16 +2038,18 @@ int ndu_client_before_stage2(void)
         LIST_FOR_EACH(tap_fd, list, &client.ndu_sync.fd_list)
         {
             struct netdev *netdev;
-            errno = 0;
             err = netdev_open(tap_fd->name, "tap", &netdev);
-            if (!err && errno == EBUSY) {
-                netdev_set_tap_fd(netdev, tap_fd->fd);
+            if (!err) {
+                const char *err_code = netdev_get_args(netdev, "errno");
+                if (err_code && !strcmp(err_code, "EBUSY")) {
+                    netdev_set_tap_fd(netdev, tap_fd->fd);
+                    VLOG_INFO("set netdev:%s with fd %d\n", netdev_get_name(netdev),
+                      tap_fd->fd);
+                }
             } else if (err) {
                 VLOG_ERR("fail to open tap dev: %s\n", tap_fd->name);
                 continue;
             }
-            VLOG_INFO("set netdev:%s with fd %d\n", netdev_get_name(netdev),
-                      tap_fd->fd);
             struct probe_netdev *n = xmalloc(sizeof *n);
             n->netdev = netdev;
             n->ref_cnt = netdev_get_ref_cnt(netdev);
