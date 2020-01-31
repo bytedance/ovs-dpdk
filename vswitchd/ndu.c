@@ -1586,6 +1586,7 @@ static void ndu_fsm_wait(struct ndu_fsm *fsm)
     case NDU_STATE_STAGE1_FINISH:
         break;
     case NDU_STATE_DATAPATH_RELEASE:
+        poll_immediate_wake();
         break;
     default:
         break;
@@ -2079,6 +2080,7 @@ int ndu_client_before_stage2(void)
         VLOG_INFO("client stage1: probe netdev complete\n");
         client.state = NDU_CLIENT_STATE_WAIT_NETDEV_DONE;
         /* retrun to mainloop, to call bridge_reconfigure */
+        poll_immediate_wake();
         break;
 
     case NDU_CLIENT_STATE_WAIT_NETDEV_DONE:
@@ -2116,6 +2118,7 @@ int ndu_client_before_stage2(void)
                   client.ndu_flow.flows_recv);
         client.state = NDU_CLIENT_STATE_START_STAGE2;
         /* return to mainloop, start pmd */
+        poll_immediate_wake();
         break;
 
     case NDU_CLIENT_STATE_START_STAGE2:
