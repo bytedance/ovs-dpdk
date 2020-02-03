@@ -680,7 +680,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
         /* if exist, check if the flow is coming from
          * a different PMDs
          */
-        return OFFLOAD_FULL;
+        return OFFLOAD_FAILED;
     }
 
     ovs_rwlock_rdlock(&aux->rwlock);
@@ -722,7 +722,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
     if (need_rollback) {
         tnlflow_del(tnlflow, aux);
     }
-    return OFFLOAD_NONE;
+    return need_rollback ? OFFLOAD_FAILED : OFFLOAD_FULL;
 }
 
 static bool
@@ -781,8 +781,9 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
             return OFFLOAD_FAILED;
         }
     } else {
+        /* let the same flow in another PMD just fail */
         netdev_close(tnl_dev);
-        return OFFLOAD_FULL;
+        return OFFLOAD_FAILED;
     }
 
     int ret = try_offload_tnl_pop(inflow, aux, info);
@@ -847,6 +848,7 @@ dp_netdev_normal_offload(struct dp_netdev_flow *flow, \
     memset(&m.tun_md, 0, sizeof m.tun_md);
     int ret;
     struct dp_netdev_actions *act = offload->dp_act;
+    info->version = flow->version;
 
     ret = netdev_flow_put(netdev, &m, act->actions, \
             act->size, &flow->mega_ufid, info, NULL);
@@ -955,9 +957,6 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
      * check if the action is ok or not, but let it goes
      * to netdev-offload layer, to let this rule replace
      * the hw rule, if fails, the original hw rule will be deleted
-     *
-     * @NOTE: if it's mod, always return OFFLOAD_NONE, to make sure
-     * not ref dp_netdev_flow.
      */
     int ret = 0;
     if (!offload_check_action(offload->dp_act, dpif_class)) {
@@ -994,7 +993,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     atomic_store_explicit(&flow->status, status, memory_order_release);
 
 exit:
-    if (offload_status_offloaded(status)) {
+    if (offload_status_offloaded(status) && !info.mod) {
         dp_netdev_flow_ref(flow);
     }
     netdev_close(netdev);

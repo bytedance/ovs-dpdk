@@ -56,9 +56,9 @@ VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk);
 struct ufid_to_rte_flow_data {
     struct cmap_node node;
     ovs_u128 ufid;
+    unsigned version;
     struct rte_flow *rte_flow;
     struct dpif_flow_stats stats;
-    struct ovs_refcount refcnt;
     struct ovs_spin spinlock;
 };
 
@@ -111,7 +111,8 @@ ufid_to_rte_flow_find(struct netdev* netdev, const ovs_u128 *ufid)
 static inline void
 ufid_to_rte_flow_associate(struct netdev *netdev,
                            const ovs_u128 *ufid,
-                           struct rte_flow *rte_flow)
+                           struct rte_flow *rte_flow,
+                           unsigned version)
 {
     struct ufid_to_rte_flow_data *data = xzalloc(sizeof *data);
 
@@ -125,8 +126,8 @@ ufid_to_rte_flow_associate(struct netdev *netdev,
 
     data->ufid = *ufid;
     data->rte_flow = rte_flow;
-    ovs_refcount_init(&data->refcnt);
     ovs_spin_init(&data->spinlock);
+    data->version = version;
 
     ufid_to_flow_data_insert(netdev, data);
 }
@@ -231,7 +232,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
         ret = -1;
         goto out;
     }
-    ufid_to_rte_flow_associate(netdev, ufid, flow);
+    ufid_to_rte_flow_associate(netdev, ufid, flow, info->version);
     VLOG_DBG("%s: installed flow %p by ufid "UUID_FMT"\n",
              netdev_get_name(netdev), flow, UUID_ARGS((struct uuid *)ufid));
 
@@ -319,28 +320,23 @@ netdev_offload_dpdk_destroy_flow(struct netdev *netdev,
                                  const ovs_u128 *ufid,
                                  struct ufid_to_rte_flow_data *fd)
 {
-    if (ovs_refcount_unref_relaxed(&fd->refcnt) == 1) {
-        ovs_spin_lock(&fd->spinlock);
-        struct rte_flow_error error;
-        int ret;
-        ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
+    ovs_spin_lock(&fd->spinlock);
+    struct rte_flow_error error;
+    int ret;
+    ret = netdev_dpdk_rte_flow_destroy(netdev, fd->rte_flow, &error);
 
-        if (ret == 0) {
-            VLOG_DBG("%s: removed rte flow %p associated with ufid " UUID_FMT "\n",
-                    netdev_get_name(netdev), fd->rte_flow,
-                    UUID_ARGS((struct uuid *)ufid));
-            ufid_to_flow_data_remove(netdev, fd);
-            ovs_spin_unlock(&fd->spinlock);
-            ovsrcu_postpone(ufid_to_flow_data_destroy, fd);
-            return 0;
-        }
-
-        ovs_refcount_init(&fd->refcnt);
+    if (ret == 0) {
+        VLOG_DBG("%s: removed rte flow %p associated with ufid " UUID_FMT "\n",
+                netdev_get_name(netdev), fd->rte_flow,
+                UUID_ARGS((struct uuid *)ufid));
+        ufid_to_flow_data_remove(netdev, fd);
         ovs_spin_unlock(&fd->spinlock);
-        return ret;
+        ovsrcu_postpone(ufid_to_flow_data_destroy, fd);
+        return 0;
     }
 
-    return ovs_refcount_read(&fd->refcnt);
+    ovs_spin_unlock(&fd->spinlock);
+    return ret;
 }
 
 static int
@@ -358,16 +354,12 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
      */
     fd = ufid_to_flow_data_find(netdev, ufid);
     if (fd) {
-        if (info->mod) {
+        if (info->mod && info->version > fd->version) {
             ret = netdev_offload_dpdk_destroy_flow(netdev, ufid, fd);
-            /* ret > 0 means only del a ref of this flow
-             * ret < 0 means del fail of this flow
-             */
             if (ret != 0)
                 return ret;
         } else {
-            ovs_refcount_ref(&fd->refcnt);
-            return 0;
+            return -1;
         }
     }
 
@@ -444,11 +436,11 @@ netdev_offload_dpdk_flow_get(struct netdev *netdev,
         return -1;
     }
 
-    rte_flow = fd->rte_flow;
     if (!fd->rte_flow) {
         ovs_spin_unlock(&fd->spinlock);
         return 0;
     }
+    rte_flow = fd->rte_flow;
 
     ret = netdev_dpdk_rte_flow_query(netdev, rte_flow, &query, &error);
     if (ret) {
@@ -490,8 +482,7 @@ netdev_dump_hw_flows(struct unixctl_conn *conn, int argc OVS_UNUSED,
 
     CMAP_FOR_EACH (data, node, hw_flows) {
         odp_format_ufid(&data->ufid, &reply); 
-        ds_put_format(&reply, ", refcnt:%d, rte_flow:%p", ovs_refcount_read(&data->refcnt), \
-                                    data->rte_flow);
+        ds_put_format(&reply, ", rte_flow:%p", data->rte_flow);
         if (data->stats.n_packets) {
             ds_put_format(&reply, ", packets:%" PRIu64 ", bytes:%" PRIu64, \
                             data->stats.n_packets, data->stats.n_bytes);

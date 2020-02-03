@@ -2770,6 +2770,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     flow = xmalloc(sizeof *flow - sizeof flow->cr.flow.mf + mask.len);
     memset(&flow->stats, 0, sizeof flow->stats);
     flow->dead = false;
+    flow->version = 0;
     flow->batch = NULL;
 
     flow->status = OFFLOAD_NONE;
@@ -2876,6 +2877,7 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
 
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
+            netdev_flow->version ++;
 
             queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
                                     pmd->dp->class, \

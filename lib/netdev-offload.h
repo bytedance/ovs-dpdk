@@ -79,6 +79,7 @@ struct offload_info {
      * it will be in the pkt meta data.
      */
     uint32_t flow_mark;
+    unsigned version;
     uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
              need_decap:1,
              need_mark:1,

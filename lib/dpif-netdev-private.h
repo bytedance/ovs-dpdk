@@ -203,6 +203,7 @@ struct dp_netdev_flow {
     struct ovs_refcount ref_cnt;
 
     bool dead;
+    unsigned version; /* mod times */
     enum offload_status status; /* offload status */
 
     /* Statistics. */
