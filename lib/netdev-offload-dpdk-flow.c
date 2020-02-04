@@ -1231,6 +1231,22 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
                                                    clone_actions_len, info)) {
                 return -1;
             }
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_PUSH_VLAN) {
+            const struct ovs_action_push_vlan *vlan = nl_attr_get(nla);
+            struct rte_flow_action_of_push_vlan *push = \
+                                        xmalloc(sizeof *push);
+            struct rte_flow_action_of_set_vlan_vid *vid = \
+                                        xmalloc(sizeof *vid);
+            struct rte_flow_action_of_set_vlan_pcp *pcp = \
+                                        xmalloc(sizeof *pcp);
+            push->ethertype = vlan->vlan_tpid;
+            vid->vlan_vid = vlan_tci_to_vid(vlan->vlan_tci);
+            pcp->vlan_pcp = vlan_tci_to_pcp(vlan->vlan_tci);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN, push);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID, vid);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_POP_VLAN) {
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_POP_VLAN, NULL);
         } else {
             VLOG_DBG_RL(&error_rl,
                         "Unsupported action type %d", nl_attr_type(nla));
