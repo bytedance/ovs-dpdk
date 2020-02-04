@@ -1332,6 +1332,7 @@ dp_netdev_offload_pause(struct dp_flow_offload *offload)
 {
     if (offload->req == true) {
         atomic_store_explicit(&offload->req, false, memory_order_seq_cst);
+        dp_netdev_wait_offload_done(offload);
         return true;
     }
     return false;
