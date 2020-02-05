@@ -945,7 +945,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     info.odp_support = &dp_netdev_support;
     const struct dpif_class *const dpif_class = offload->class;
     *CONST_CAST(const struct dpif_class **, &info.dpif_class) = dpif_class;
-    info.mod = (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_MOD);
+    enum offload_status old_status = flow_offload_status(flow);
 
     if (flow->dead) {
         return -1;
@@ -956,16 +956,11 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
         return -1;
     }
 
-    /* if it's mod, the rule might exist in hw, so we can't
-     * check if the action is ok or not, but let it goes
-     * to netdev-offload layer, to let this rule replace
-     * the hw rule, if fails, the original hw rule will be deleted
-     */
     int ret = 0;
     if (!offload_check_action(offload->dp_act, dpif_class)) {
         netdev_close(netdev);
         if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD || \
-                    flow_offload_status(flow) == OFFLOAD_FAILED) {
+                    !offload_status_offloaded(old_status)) {
             atomic_store_explicit(&flow->status, OFFLOAD_FAILED, memory_order_release);
             return -1;
         } else {
@@ -974,7 +969,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
             offload->op = DP_NETDEV_FLOW_OFFLOAD_OP_DEL;
             ret = dp_netdev_flow_offload_del(offload);
             atomic_store_explicit(&flow->status, OFFLOAD_FAILED, memory_order_release);
-            return ret;
+            return -1;
         }
     }
 
@@ -1000,7 +995,8 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     atomic_store_explicit(&flow->status, status, memory_order_release);
 
 exit:
-    if (offload_status_offloaded(status) && !info.mod) {
+    if (!offload_status_offloaded(old_status) &&\
+            offload_status_offloaded(status)) {
         dp_netdev_flow_ref(flow);
     }
     netdev_close(netdev);

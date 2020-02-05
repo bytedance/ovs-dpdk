@@ -354,7 +354,7 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
      */
     fd = ufid_to_flow_data_find(netdev, ufid);
     if (fd) {
-        if (info->mod && info->version > fd->version) {
+        if (info->version > fd->version) {
             ret = netdev_offload_dpdk_destroy_flow(netdev, ufid, fd);
             if (ret != 0)
                 return ret;

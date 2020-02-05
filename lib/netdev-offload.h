@@ -82,8 +82,7 @@ struct offload_info {
     unsigned version;
     uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
              need_decap:1,
-             need_mark:1,
-             mod:1;
+             need_mark:1;
 };
 
 int netdev_flow_flush(struct netdev *);

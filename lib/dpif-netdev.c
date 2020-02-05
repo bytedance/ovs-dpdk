@@ -368,6 +368,7 @@ struct dp_netdev {
     struct conntrack *conntrack;
     struct pmd_auto_lb pmd_alb;
     struct dp_flow_offload *dp_flow_offload;
+    bool pmd_paused;
 };
 
 static void meter_lock(const struct dp_netdev *dp, uint32_t meter_id)
@@ -3373,6 +3374,7 @@ dp_netdev_pmd_pause(struct dp_netdev *dp)
         pmd->need_reload = true;
     }
     reload_affected_pmds(dp);
+    dp->pmd_paused = true;
 }
 
 static void
@@ -3385,6 +3387,7 @@ dp_netdev_pmd_resume(struct dp_netdev *dp)
         pmd->need_reload = true;
     }
     reload_affected_pmds(dp);
+    dp->pmd_paused = false;
 }
 
 /* Applies datapath configuration from the database. Some of the changes are
@@ -3507,9 +3510,11 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     }
 
     if (smap_get_bool(other_config, "pmd-pause", false)) {
-        dp_netdev_pmd_pause(dp);
+        if (!dp->pmd_paused)
+            dp_netdev_pmd_pause(dp);
     } else {
-        dp_netdev_pmd_resume(dp);
+        if (dp->pmd_paused)
+            dp_netdev_pmd_resume(dp);
     }
 
     set_pmd_auto_lb(dp);
