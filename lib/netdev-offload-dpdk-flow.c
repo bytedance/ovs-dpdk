@@ -259,7 +259,9 @@ ds_put_flow_pattern(struct ds *s, const struct rte_flow_item *item)
 static void
 ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
 {
-    if (actions->type == RTE_FLOW_ACTION_TYPE_MARK) {
+    switch (actions->type) {
+    case RTE_FLOW_ACTION_TYPE_MARK:
+    {
         const struct rte_flow_action_mark *mark = actions->conf;
 
         ds_put_cstr(s, "rte flow mark action:\n");
@@ -270,7 +272,10 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Mark = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_RSS) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_RSS:
+    {
         const struct rte_flow_action_rss *rss = actions->conf;
 
         ds_put_cstr(s, "rte flow RSS action:\n");
@@ -280,7 +285,10 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  RSS = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_COUNT) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_COUNT:
+    {
         const struct rte_flow_action_count *count = actions->conf;
 
         ds_put_cstr(s, "rte flow count action:\n");
@@ -291,7 +299,10 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Count = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_PORT_ID) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_PORT_ID:
+    {
         const struct rte_flow_action_port_id *port_id = actions->conf;
 
         ds_put_cstr(s, "rte flow port-id action:\n");
@@ -302,10 +313,14 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Port-id = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_DROP) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_DROP:
         ds_put_cstr(s, "rte flow drop action\n");
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_SRC ||
-               actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_DST) {
+        break;
+    case RTE_FLOW_ACTION_TYPE_SET_MAC_SRC:
+    case RTE_FLOW_ACTION_TYPE_SET_MAC_DST:
+    {
         const struct rte_flow_action_set_mac *set_mac = actions->conf;
 
         char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_MAC_DST
@@ -319,8 +334,11 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_format(s, "  Set-mac-%s = null\n", dirstr);
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC ||
-               actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_DST) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_SET_IPV4_SRC:
+    case RTE_FLOW_ACTION_TYPE_SET_IPV4_DST:
+    {
         const struct rte_flow_action_set_ipv4 *set_ipv4 = actions->conf;
         char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_IPV4_DST
                        ? "dst" : "src";
@@ -333,7 +351,10 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_format(s, "  Set-ipv4-%s = null\n", dirstr);
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_TTL) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_SET_TTL:
+    {
         const struct rte_flow_action_set_ttl *set_ttl = actions->conf;
 
         ds_put_cstr(s, "rte flow set-ttl action:\n");
@@ -343,7 +364,10 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Set-ttl = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_RAW_ENCAP) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_RAW_ENCAP:
+    {
         const struct rte_flow_action_raw_encap *raw_encap = actions->conf;
 
         ds_put_cstr(s, "rte flow raw-encap action:\n");
@@ -357,11 +381,17 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_cstr(s, "  Raw-encap = null\n");
         }
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_RAW_DECAP) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_RAW_DECAP:
+    {
         const struct rte_flow_action_raw_decap *raw_decap = actions->conf;
         ds_put_format(s, "rte flow raw_decap action: pop %"PRIu64"\n", raw_decap->size);
-    } else if (actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_SRC ||
-               actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_DST) {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_SET_TP_SRC:
+    case RTE_FLOW_ACTION_TYPE_SET_TP_DST:
+    {
         const struct rte_flow_action_set_tp *set_tp = actions->conf;
         char *dirstr = actions->type == RTE_FLOW_ACTION_TYPE_SET_TP_DST
                        ? "dst" : "src";
@@ -374,7 +404,63 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         } else {
             ds_put_format(s, "  Set-%s-tcp/udp-port = null\n", dirstr);
         }
-    } else {
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_OF_POP_VLAN:
+        ds_put_cstr(s, "rte flow vlan pop action\n");
+        break;
+    case RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN:
+    {
+        const struct rte_flow_action_of_push_vlan *vlan = actions->conf;
+        ds_put_format(s, "rte flow push_vlan:(ethertype:%0x)\n", ntohs(vlan->ethertype));
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID:
+    {
+        const struct rte_flow_action_of_set_vlan_vid *vid = actions->conf;
+        ds_put_format(s, "rte flow set_vlan_vid:%d\n", vid->vlan_vid);
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP:
+    {
+        const struct rte_flow_action_of_set_vlan_pcp *pcp = actions->conf;
+        ds_put_format(s, "rte flow set_vlan_pcp:%d\n", pcp->vlan_pcp);
+        break;
+    }
+    case RTE_FLOW_ACTION_TYPE_END:
+    case RTE_FLOW_ACTION_TYPE_VOID:
+    case RTE_FLOW_ACTION_TYPE_PASSTHRU:
+    case RTE_FLOW_ACTION_TYPE_JUMP:
+    case RTE_FLOW_ACTION_TYPE_FLAG:
+    case RTE_FLOW_ACTION_TYPE_QUEUE:
+    case RTE_FLOW_ACTION_TYPE_PF:
+    case RTE_FLOW_ACTION_TYPE_VF:
+    case RTE_FLOW_ACTION_TYPE_PHY_PORT:
+    case RTE_FLOW_ACTION_TYPE_METER:
+    case RTE_FLOW_ACTION_TYPE_SECURITY:
+    case RTE_FLOW_ACTION_TYPE_OF_SET_MPLS_TTL:
+    case RTE_FLOW_ACTION_TYPE_OF_DEC_MPLS_TTL:
+    case RTE_FLOW_ACTION_TYPE_OF_SET_NW_TTL:
+    case RTE_FLOW_ACTION_TYPE_OF_DEC_NW_TTL:
+    case RTE_FLOW_ACTION_TYPE_OF_COPY_TTL_OUT:
+    case RTE_FLOW_ACTION_TYPE_OF_COPY_TTL_IN:
+    case RTE_FLOW_ACTION_TYPE_OF_POP_MPLS:
+    case RTE_FLOW_ACTION_TYPE_OF_PUSH_MPLS:
+    case RTE_FLOW_ACTION_TYPE_VXLAN_ENCAP:
+    case RTE_FLOW_ACTION_TYPE_VXLAN_DECAP:
+    case RTE_FLOW_ACTION_TYPE_NVGRE_ENCAP:
+    case RTE_FLOW_ACTION_TYPE_NVGRE_DECAP:
+    case RTE_FLOW_ACTION_TYPE_SET_IPV6_SRC:
+    case RTE_FLOW_ACTION_TYPE_SET_IPV6_DST:
+    case RTE_FLOW_ACTION_TYPE_MAC_SWAP:
+    case RTE_FLOW_ACTION_TYPE_DEC_TTL:
+    case RTE_FLOW_ACTION_TYPE_INC_TCP_SEQ:
+    case RTE_FLOW_ACTION_TYPE_DEC_TCP_SEQ:
+    case RTE_FLOW_ACTION_TYPE_INC_TCP_ACK:
+    case RTE_FLOW_ACTION_TYPE_DEC_TCP_ACK:
+    case RTE_FLOW_ACTION_TYPE_SET_TAG:
+    case RTE_FLOW_ACTION_TYPE_SET_META:
+    default:
         ds_put_format(s, "unknown rte flow action (%d)\n", actions->type);
     }
 }
@@ -1176,6 +1262,22 @@ netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
             if (netdev_dpdk_flow_add_output_action(actions, ca, info)) {
                 return -1;
             }
+        } else if (clone_type == OVS_ACTION_ATTR_PUSH_VLAN) {
+            const struct ovs_action_push_vlan *vlan = nl_attr_get(ca);
+            struct rte_flow_action_of_push_vlan *push = \
+                                        xmalloc(sizeof *push);
+            struct rte_flow_action_of_set_vlan_vid *vid = \
+                                        xmalloc(sizeof *vid);
+            struct rte_flow_action_of_set_vlan_pcp *pcp = \
+                                        xmalloc(sizeof *pcp);
+            push->ethertype = vlan->vlan_tpid;
+            vid->vlan_vid = vlan_tci_to_vid(vlan->vlan_tci);
+            pcp->vlan_pcp = vlan_tci_to_pcp(vlan->vlan_tci);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN, push);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID, vid);
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
+        } else if (clone_type == OVS_ACTION_ATTR_POP_VLAN) {
+            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_POP_VLAN, NULL);
         } else {
             VLOG_DBG_RL(&error_rl,
                         "Unsupported clone action. clone_type=%d", clone_type);

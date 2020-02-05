@@ -131,6 +131,9 @@ dp_netdev_alloc_flow_offload(const struct dpif_class * const dpif_class,
 {
     struct dp_flow_offload_item *offload = NULL;
 
+    if (!dp_netdev_flow_ref(flow)) {
+        return NULL;
+    }
     offload = xzalloc(sizeof(*offload));
     *CONST_CAST(const struct dpif_class **, &offload->class) = dpif_class;
     offload->flow = flow;
@@ -144,7 +147,6 @@ dp_netdev_alloc_flow_offload(const struct dpif_class * const dpif_class,
                               dp_netdev_actions_create(\
                                       old_act->actions, \
                                       old_act->size);
-    dp_netdev_flow_ref(flow);
     return offload;
 }
 
@@ -990,7 +992,11 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     }
 
     ret = dp_netdev_normal_offload(flow, netdev, offload, &info);
-    status = info.actions_offloaded ? OFFLOAD_FULL : OFFLOAD_FAILED;
+    if (!ret) {
+        status = info.actions_offloaded ? OFFLOAD_FULL : OFFLOAD_MASK;
+    } else {
+        status = OFFLOAD_FAILED;
+    }
     atomic_store_explicit(&flow->status, status, memory_order_release);
 
 exit:
@@ -1106,8 +1112,10 @@ queue_netdev_flow_del(struct dp_flow_offload *dp_flow_offload, \
     if (!flow_offload_in_progress(flow)) {
         offload = dp_netdev_alloc_flow_offload(dpif_class, flow, NULL,
                 DP_NETDEV_FLOW_OFFLOAD_OP_DEL);
-        flow->status |= OFFLOAD_IN_PROGRESS;
-        dp_netdev_append_flow_offload(dp_flow_offload, offload);
+        if (offload) {
+            flow->status |= OFFLOAD_IN_PROGRESS;
+            dp_netdev_append_flow_offload(dp_flow_offload, offload);
+        }
     }
     ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
@@ -1132,8 +1140,10 @@ queue_netdev_flow_put(struct dp_flow_offload *dp_flow_offload,\
     ovs_mutex_lock(&dp_flow_offload->mutex);
     if (!flow_offload_in_progress(flow)) {
         offload = dp_netdev_alloc_flow_offload(dpif_class, flow, old_act, op);
-        flow->status |= OFFLOAD_IN_PROGRESS;
-        dp_netdev_append_flow_offload(dp_flow_offload, offload);
+        if (offload) {
+            flow->status |= OFFLOAD_IN_PROGRESS;
+            dp_netdev_append_flow_offload(dp_flow_offload, offload);
+        }
     }
     ovs_mutex_unlock(&dp_flow_offload->mutex);
 }
