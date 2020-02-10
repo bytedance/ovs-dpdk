@@ -33,6 +33,7 @@ struct ingress_flow {
     struct dp_netdev_flow *flow;
     struct netdev *ingress_netdev;
     enum offload_status status;
+    uint32_t action_flags;
     struct hmap_node node;
 };
 
@@ -43,6 +44,7 @@ struct tnl_pop_flow {
     enum offload_status status;
     /* how many ingress rules associate with this rule */
     int ref;
+    uint32_t action_flags;
     struct hmap_node node;
 };
 

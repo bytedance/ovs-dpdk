@@ -235,14 +235,16 @@ ingress_flow_del(struct ingress_flow *inflow,\
 }
 
 static struct ingress_flow *
-ingress_flow_new(struct dp_netdev_flow *flow, \
-                 struct netdev *inport)
+ingress_flow_new(struct dp_netdev_flow *flow,
+                 struct netdev *inport,
+                 uint32_t action_flags)
 {
     struct ingress_flow *inflow;
 
     inflow = xzalloc(sizeof(struct ingress_flow));
     inflow->ingress_netdev = inport;
     inflow->flow = flow;
+    inflow->action_flags = action_flags;
 
     netdev_ref(inflow->ingress_netdev);
     dp_netdev_flow_ref(flow);
@@ -291,22 +293,10 @@ tnl_pop_flow_op_put(struct ingress_flow *inflow,\
     memcpy(&info->tun_dl_dst, &in_flow.dl_dst, sizeof(struct eth_addr));
     info->tun_dst = in_flow.nw_dst;
 
-    /*FIXME: use tnlflow->in_port and netdev_get_type to set vport_type */
-    info->vport_type = VPORT_VXLAN;
-
     ovs_u128 mega_ufid;
     tnl_pop_flow_get_ufid(inflow, tnlflow, &mega_ufid);
-
-    if (act->size > 0 && dp_netdev_action_get(act->actions, act->size, \
-                    OVS_ACTION_ATTR_OUTPUT)) {
-        info->need_decap = 1;
-    } else {
-        /* does not has output, might be drop.
-         * accoridng to mlnx dpdk, decap and drop
-         * cannot co-exist
-         */
-        info->need_decap = 0;
-    }
+    info->action_flags |= tnlflow->action_flags;
+    info->action_flags |= inflow->action_flags;
 
     ret = netdev_flow_put(inflow->ingress_netdev, &tnl_m,
             act->actions, act->size, &mega_ufid, info,
@@ -482,11 +472,12 @@ tnlflow_find(struct dp_netdev_flow *flow, \
 }
 
 static struct tnl_pop_flow*
-tnlflow_new(struct dp_netdev_flow *flow)
+tnlflow_new(struct dp_netdev_flow *flow, uint32_t action_flags)
 {
     struct tnl_pop_flow *tnlflow;
     tnlflow = xzalloc(sizeof(struct tnl_pop_flow));
     tnlflow->flow = flow;
+    tnlflow->action_flags = action_flags;
     dp_netdev_flow_ref(flow);
     return tnlflow;
 }
@@ -678,7 +669,7 @@ dp_netdev_try_offload_tnl_pop(struct dp_netdev_flow *flow,\
      */
     tnlflow = tnlflow_find(flow, aux, &found);
     if (!found)
-        tnlflow = tnlflow_new(flow);
+        tnlflow = tnlflow_new(flow, info->action_flags);
     else if (tnlflow->flow != flow) {
         /* if exist, check if the flow is coming from
          * a different PMDs
@@ -737,11 +728,11 @@ ingress_flow_validate(struct ingress_flow *inflow, \
     miniflow_expand(&inflow->flow->cr.mask->mf, &m.wc.masks);
     memset(&m.tun_md, 0, sizeof m.tun_md);
 
-    info->need_mark = 1;
+    info->mark_set = 1;
     int ret = netdev_flow_put(inflow->ingress_netdev, &m,
             NULL, 0, &inflow->flow->mega_ufid, info,
             NULL);
-    info->need_mark = 0;
+    info->mark_set = 0;
     if(ret)
         return false;
     netdev_flow_del(inflow->ingress_netdev, &inflow->flow->mega_ufid, NULL);
@@ -775,7 +766,7 @@ dp_netdev_try_offload_ingress_add(struct dp_netdev_flow *flow,\
      * pmd thread flow table
      */
     if (!found) {
-        inflow = ingress_flow_new(flow, inport);
+        inflow = ingress_flow_new(flow, inport, info->action_flags);
         bool valid;
         valid = ingress_flow_validate(inflow, info);
         if (!valid) {
@@ -869,7 +860,11 @@ is_port_tap(odp_port_t portno, const struct dpif_class *const class)
     return false;
 }
 
-static void 
+enum {
+    ACTION_OUTPUT = 1<<0,
+};
+
+static unsigned
 check_clone_actions(const struct nlattr *clone_act, \
                     const size_t act_size, \
                     const struct dpif_class *const class, \
@@ -878,6 +873,7 @@ check_clone_actions(const struct nlattr *clone_act, \
     const struct nlattr *a;
     unsigned int left;
     *check_ret = false;
+    unsigned flag = 0;
 
     NL_ATTR_FOR_EACH_UNSAFE (a, left, clone_act, act_size) {
         int _type = nl_attr_type(a);
@@ -885,29 +881,38 @@ check_clone_actions(const struct nlattr *clone_act, \
             /* "internal dev, tap dev, not offload */
             odp_port_t portno = nl_attr_get_odp_port(a);
             if (is_port_tap(portno, class)) {
-                return;
+                return flag;
             } else {
                 /* has fate action */
                 *check_ret = true;
             }
+            flag |= ACTION_OUTPUT;
         }
     }
+    return flag;
 }
 
 static bool
-offload_check_action(struct dp_netdev_actions *act, \
-                     const struct dpif_class *const dpif_class)
+offload_check_action(struct netdev *inport,\
+                     struct dp_netdev_actions *act, \
+                     struct offload_info *info)
 {
     const struct nlattr *a;
     unsigned int left;
     bool offloadable = false;
+    unsigned flag = 0;
+
+    if (!strcmp(netdev_get_type(inport), "vxlan")) {
+        info->vxlan_decap = 1;
+    }
 
     NL_ATTR_FOR_EACH_UNSAFE (a, left, act->actions, act->size) {
         int _type = nl_attr_type(a);
         if (_type == OVS_ACTION_ATTR_OUTPUT) {
+            flag |= ACTION_OUTPUT;
             odp_port_t portno = nl_attr_get_odp_port(a);
             /* tap dev not offload */
-            if (is_port_tap(portno, dpif_class))
+            if (is_port_tap(portno, info->dpif_class))
                 return false; 
             else {
                 offloadable = true;
@@ -916,17 +921,29 @@ offload_check_action(struct dp_netdev_actions *act, \
             if (left <= NLA_ALIGN(a->nla_len)) {
                 const struct nlattr *clone_actions = nl_attr_get(a);
                 size_t clone_actions_len = nl_attr_get_size(a);
-                check_clone_actions(clone_actions, clone_actions_len, dpif_class, &offloadable);
+                flag |= check_clone_actions(clone_actions, clone_actions_len,
+                        info->dpif_class, &offloadable);
             } else {
                 /* does not clone */
                 return false;
             }
         } else if (_type == OVS_ACTION_ATTR_TUNNEL_POP) {
+            flag |= ACTION_OUTPUT;
+            odp_port_t portno = nl_attr_get_odp_port(a);
+            struct netdev *tnl_dev = netdev_ports_get(portno, info->dpif_class);
+            if (!strcmp(netdev_get_type(tnl_dev), "vxlan")) {
+                info->vxlan_decap = 1;
+            }
+            netdev_close(tnl_dev);
+            offloadable = true;
+        } else if (_type == OVS_ACTION_ATTR_PUSH_VLAN) {
+            info->vlan_push = 1;
             offloadable = true;
         }
     }
 
-    if (act->size == 0) {
+    if (act->size == 0 || !(flag & ACTION_OUTPUT)) {
+        info->drop = 1;
         /* drop action */
         offloadable = true;
     }
@@ -957,7 +974,7 @@ dp_netdev_try_offload(struct dp_flow_offload_item *offload)
     }
 
     int ret = 0;
-    if (!offload_check_action(offload->dp_act, dpif_class)) {
+    if (!offload_check_action(netdev, offload->dp_act, &info)) {
         netdev_close(netdev);
         if (offload->op == DP_NETDEV_FLOW_OFFLOAD_OP_ADD || \
                     !offload_status_offloaded(old_status)) {

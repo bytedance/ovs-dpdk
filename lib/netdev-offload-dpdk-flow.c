@@ -16,6 +16,7 @@
 #include <config.h>
 
 #include <rte_flow.h>
+#include <rte_ether.h>
 
 #include "dpif-netdev.h"
 #include "netdev-offload-provider.h"
@@ -24,6 +25,7 @@
 #include "netdev-vport-private.h"
 #include "openvswitch/match.h"
 #include "openvswitch/vlog.h"
+#include "openvswitch/types.h"
 #include "packets.h"
 
 VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk_flow);
@@ -427,6 +429,11 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
         ds_put_format(s, "rte flow set_vlan_pcp:%d\n", pcp->vlan_pcp);
         break;
     }
+    case RTE_FLOW_ACTION_TYPE_VXLAN_DECAP:
+    {
+        ds_put_cstr(s, "rte flow vxlan_decap\n");
+        break;
+    }
     case RTE_FLOW_ACTION_TYPE_END:
     case RTE_FLOW_ACTION_TYPE_VOID:
     case RTE_FLOW_ACTION_TYPE_PASSTHRU:
@@ -447,7 +454,6 @@ ds_put_flow_action(struct ds *s, const struct rte_flow_action *actions)
     case RTE_FLOW_ACTION_TYPE_OF_POP_MPLS:
     case RTE_FLOW_ACTION_TYPE_OF_PUSH_MPLS:
     case RTE_FLOW_ACTION_TYPE_VXLAN_ENCAP:
-    case RTE_FLOW_ACTION_TYPE_VXLAN_DECAP:
     case RTE_FLOW_ACTION_TYPE_NVGRE_ENCAP:
     case RTE_FLOW_ACTION_TYPE_NVGRE_DECAP:
     case RTE_FLOW_ACTION_TYPE_SET_IPV6_SRC:
@@ -880,7 +886,7 @@ is_vxlan_flow(const struct match *match,
                 struct offload_info *info)
 {
     bool is_tnl = flow_tnl_dst_is_set(&match->flow.tunnel);
-    bool is_vxlan = info->vport_type == VPORT_VXLAN;
+    bool is_vxlan = info->vxlan_decap == 1;
     return is_tnl && is_vxlan;
 }
 
@@ -1234,8 +1240,65 @@ netdev_dpdk_flow_add_set_actions(struct flow_actions *actions,
     return 0;
 }
 
+struct ether_vlan {
+    struct eth_addr dst;
+    struct eth_addr src;
+    struct ovs_action_push_vlan v;
+    uint16_t ethertype;
+};
+
+static void
+add_normal_vlan_push(struct flow_actions *actions,
+                     const struct ovs_action_push_vlan *vlan)
+{
+    struct rte_flow_action_of_push_vlan *push = \
+                                                xzalloc(sizeof *push);
+    struct rte_flow_action_of_set_vlan_vid *vid = \
+                                                  xzalloc(sizeof *vid);
+    struct rte_flow_action_of_set_vlan_pcp *pcp = \
+                                                  xzalloc(sizeof *pcp);
+    push->ethertype = vlan->vlan_tpid;
+    vid->vlan_vid = vlan_tci_to_vid(vlan->vlan_tci);
+    pcp->vlan_pcp = vlan_tci_to_pcp(vlan->vlan_tci);
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN, push);
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID, vid);
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
+}
+
+#define VXLAN_HEADER_SIZE 50
+
+static const struct eth_addr default_src = ETH_ADDR_C(EE, FF, FF, FF, FF, FF);
+
+static void
+add_vxlan_vlan_map(struct flow_actions *actions,
+                   const struct match *match,
+                   const struct ovs_action_push_vlan *vlan)
+{
+    struct rte_flow_action_raw_decap *raw_decap =
+        xzalloc(sizeof *raw_decap);
+    raw_decap->size = VXLAN_HEADER_SIZE + sizeof(struct rte_ether_hdr);
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_DECAP, raw_decap);
+#if 0
+    struct rte_flow_action_raw_encap *raw_encap =
+        xzalloc(sizeof (*raw_encap) + sizeof (struct ether_vlan));
+
+    struct ether_vlan *ev = (struct ether_vlan*)(raw_encap + 1);
+    memcpy(&ev->dst, &match->flow.dl_dst, sizeof(ev->dst));
+    ev->src = default_src;
+    ev->v = *vlan;
+    ev->ethertype = match->flow.dl_type;
+
+    raw_encap->preserve = NULL;
+    raw_encap->data = (void*)ev;
+    raw_encap->size = sizeof(struct ether_vlan);
+
+    add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_ENCAP, raw_encap);
+#endif
+}
+
 static int
 netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
+                                   const struct match *match,
                                    const struct nlattr *clone_actions,
                                    const size_t clone_actions_len,
                                    struct offload_info *info)
@@ -1264,20 +1327,11 @@ netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
             }
         } else if (clone_type == OVS_ACTION_ATTR_PUSH_VLAN) {
             const struct ovs_action_push_vlan *vlan = nl_attr_get(ca);
-            struct rte_flow_action_of_push_vlan *push = \
-                                        xmalloc(sizeof *push);
-            struct rte_flow_action_of_set_vlan_vid *vid = \
-                                        xmalloc(sizeof *vid);
-            struct rte_flow_action_of_set_vlan_pcp *pcp = \
-                                        xmalloc(sizeof *pcp);
-            push->ethertype = vlan->vlan_tpid;
-            vid->vlan_vid = vlan_tci_to_vid(vlan->vlan_tci);
-            pcp->vlan_pcp = vlan_tci_to_pcp(vlan->vlan_tci);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN, push);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID, vid);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
-        } else if (clone_type == OVS_ACTION_ATTR_POP_VLAN) {
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_POP_VLAN, NULL);
+            if (!info->vxlan_decap) {
+                add_normal_vlan_push(actions, vlan);
+            } else {
+                add_vxlan_vlan_map(actions, match, vlan);
+            }
         } else {
             VLOG_DBG_RL(&error_rl,
                         "Unsupported clone action. clone_type=%d", clone_type);
@@ -1288,9 +1342,9 @@ netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
     return 0;
 }
 
-#define VXLAN_HEADER_SIZE 50
 int
 netdev_dpdk_flow_actions_add(struct flow_actions *actions,
+                             const struct match *m,
                              struct nlattr *nl_actions,
                              size_t nl_actions_len,
                              struct offload_info *info)
@@ -1298,14 +1352,15 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
     struct nlattr *nla;
     size_t left;
 
-    if (info->need_decap) {
-        if (info->vport_type == VPORT_VXLAN) {
-            struct rte_flow_action_raw_decap *raw_decap =
-                xzalloc(sizeof *raw_decap);
+    if (info->drop) {
+        netdev_dpdk_flow_add_count_action(actions);
+        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_DROP, NULL);
+        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
+        return 0;
+    }
 
-            raw_decap->size = VXLAN_HEADER_SIZE;
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_DECAP, raw_decap);
-        }
+    if (info->vxlan_decap && !info->vlan_push) {
+        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_VXLAN_DECAP, NULL);
     }
 
     NL_ATTR_FOR_EACH_UNSAFE (nla, left, nl_actions, nl_actions_len) {
@@ -1329,24 +1384,17 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
             const struct nlattr *clone_actions = nl_attr_get(nla);
             size_t clone_actions_len = nl_attr_get_size(nla);
 
-            if (netdev_dpdk_flow_add_clone_actions(actions, clone_actions,
+            if (netdev_dpdk_flow_add_clone_actions(actions, m, clone_actions,
                                                    clone_actions_len, info)) {
                 return -1;
             }
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_PUSH_VLAN) {
             const struct ovs_action_push_vlan *vlan = nl_attr_get(nla);
-            struct rte_flow_action_of_push_vlan *push = \
-                                        xmalloc(sizeof *push);
-            struct rte_flow_action_of_set_vlan_vid *vid = \
-                                        xmalloc(sizeof *vid);
-            struct rte_flow_action_of_set_vlan_pcp *pcp = \
-                                        xmalloc(sizeof *pcp);
-            push->ethertype = vlan->vlan_tpid;
-            vid->vlan_vid = vlan_tci_to_vid(vlan->vlan_tci);
-            pcp->vlan_pcp = vlan_tci_to_pcp(vlan->vlan_tci);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_PUSH_VLAN, push);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_VID, vid);
-            add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
+            if (!info->vxlan_decap) {
+                add_normal_vlan_push(actions, vlan);
+            } else {
+                add_vxlan_vlan_map(actions, m, vlan);
+            }
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_POP_VLAN) {
             add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_POP_VLAN, NULL);
         } else {
@@ -1356,11 +1404,6 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
         }
     }
 
-    if (nl_actions_len == 0) {
-        netdev_dpdk_flow_add_count_action(actions);
-        add_flow_action(actions, RTE_FLOW_ACTION_TYPE_DROP, NULL);
-    }
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_END, NULL);
     return 0;
 }
-

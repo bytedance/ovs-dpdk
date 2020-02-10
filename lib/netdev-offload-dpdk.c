@@ -207,7 +207,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
         goto out;
     }
 
-    if (info->need_mark) {
+    if (info->mark_set) {
         /* if we failed to offload the rule actions fallback to mark rss
          * actions.
          */
@@ -216,6 +216,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
                                               info->flow_mark);
     } else {
         info->actions_offloaded = !netdev_dpdk_flow_actions_add(&actions,
+                                                                match,
                                                                 nl_actions,
                                                                 actions_len, info);
     }

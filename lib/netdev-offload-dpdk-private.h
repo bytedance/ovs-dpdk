@@ -41,6 +41,7 @@ netdev_dpdk_flow_actions_add_mark_rss(struct flow_actions *actions,
                                       uint32_t mark_id);
 int
 netdev_dpdk_flow_actions_add(struct flow_actions *actions,
+                             const struct match *m,
                              struct nlattr *nl_actions,
                              size_t nl_actions_len,
                              struct offload_info *info);

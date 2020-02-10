@@ -71,7 +71,6 @@ struct offload_info {
     struct eth_addr tun_dl_dst;
     ovs_be16 tp_dst_port;
     uint8_t tunnel_csum_on; /* Tunnel header with checksum */
-    int vport_type;
 
     struct odp_support *odp_support;
     /*
@@ -80,9 +79,16 @@ struct offload_info {
      */
     uint32_t flow_mark;
     unsigned version;
-    uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
-             need_decap:1,
-             need_mark:1;
+    union {
+        uint32_t action_flags;
+        struct {
+            uint32_t actions_offloaded:1,/* true if flow is fully actions_offloaded */
+                     vxlan_decap:1,
+                     vlan_push:1,
+                     mark_set:1,
+                     drop:1;
+        };
+    };
 };
 
 int netdev_flow_flush(struct netdev *);

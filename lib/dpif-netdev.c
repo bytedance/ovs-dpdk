@@ -799,12 +799,18 @@ dfc_cache_uninit(struct dfc_cache *flow_cache)
 /* Check and clear dead flow references slowly (one entry at each
  * invocation).  */
 static void
-emc_cache_slow_sweep(struct emc_cache *flow_cache)
+emc_cache_slow_sweep(struct dp_netdev *dp, struct emc_cache *flow_cache)
 {
     struct emc_entry *entry = &flow_cache->entries[flow_cache->sweep_idx];
 
     if (!emc_entry_alive(entry)) {
         emc_clear_entry(entry);
+    } else {
+        if (entry->flow->status == OFFLOAD_NONE)
+            queue_netdev_flow_put(dp->dp_flow_offload, dp->class,
+                    entry->flow, NULL, DP_NETDEV_FLOW_OFFLOAD_OP_ADD);
+        else if (entry->flow->status == OFFLOAD_FULL)
+            emc_clear_entry(entry);
     }
     flow_cache->sweep_idx = (flow_cache->sweep_idx + 1) & EM_FLOW_HASH_MASK;
 }
@@ -5188,7 +5194,7 @@ reload:
             coverage_try_clear();
             dp_netdev_pmd_try_optimize(pmd, poll_list, poll_cnt);
             if (!ovsrcu_try_quiesce()) {
-                emc_cache_slow_sweep(&((pmd->flow_cache).emc_cache));
+                emc_cache_slow_sweep(pmd->dp, &((pmd->flow_cache).emc_cache));
             }
 
             for (i = 0; i < poll_cnt; i++) {
