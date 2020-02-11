@@ -1694,8 +1694,12 @@ static int ndu_conn_run(struct ndu_conn *conn)
                 VLOG_INFO("Stage2 begins\n");
                 conn->method = NDU_STAGE2;
                 conn->rollback_if_broken = false;
-                ndu_fsm_start(conn->fsm, NDU_STATE_DATAPATH_RELEASE,
-                              ndu_fsm_run_stage2);
+                if (conn->fsm->state == NDU_STATE_STAGE1_FINISH) {
+                    ndu_fsm_start(conn->fsm, NDU_STATE_DATAPATH_RELEASE,
+                            ndu_fsm_run_stage2);
+                } else {
+                    ndu_jsonrpc_error(conn, "wrong state");
+                }
                 goto finish_msg;
             }
 
