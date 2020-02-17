@@ -1275,6 +1275,7 @@ add_normal_vlan_push(struct flow_actions *actions,
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_SET_VLAN_PCP, pcp);
 }
 
+#if 0
 #define VXLAN_HEADER_SIZE 50
 
 static const struct eth_addr default_src = ETH_ADDR_C(EE, FF, FF, FF, FF, FF);
@@ -1303,6 +1304,7 @@ add_vxlan_vlan_map(struct flow_actions *actions,
 
     add_flow_action(actions, RTE_FLOW_ACTION_TYPE_RAW_ENCAP, raw_encap);
 }
+#endif
 
 /* Maximum number of items in struct rte_flow_action_vxlan_encap.
  * ETH / IPv4(6) / UDP / VXLAN / END
@@ -1393,7 +1395,7 @@ err:
 
 static int
 netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
-                                   const struct match *match,
+                                   const struct match *match OVS_UNUSED,
                                    const struct nlattr *clone_actions,
                                    const size_t clone_actions_len,
                                    struct offload_info *info)
@@ -1431,7 +1433,7 @@ netdev_dpdk_flow_add_clone_actions(struct flow_actions *actions,
             if (!info->vxlan_decap) {
                 add_normal_vlan_push(actions, vlan);
             } else {
-                add_vxlan_vlan_map(actions, match, vlan);
+                return -1;
             }
         } else {
             VLOG_DBG_RL(&error_rl,
@@ -1494,7 +1496,7 @@ netdev_dpdk_flow_actions_add(struct flow_actions *actions,
             if (!info->vxlan_decap) {
                 add_normal_vlan_push(actions, vlan);
             } else {
-                add_vxlan_vlan_map(actions, m, vlan);
+                return -1;
             }
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_POP_VLAN) {
             add_flow_action(actions, RTE_FLOW_ACTION_TYPE_OF_POP_VLAN, NULL);

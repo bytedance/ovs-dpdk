@@ -219,6 +219,10 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
                                                                 match,
                                                                 nl_actions,
                                                                 actions_len, info);
+        if (!info->actions_offloaded) {
+            ret = -1;
+            goto out;
+        }
     }
 
     flow = netdev_dpdk_rte_flow_create(netdev, &flow_attr,
