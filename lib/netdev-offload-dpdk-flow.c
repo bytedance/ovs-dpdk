@@ -617,14 +617,6 @@ add_l3_pattern(struct rte_flow_item pattern[],
         return -1;
     }
 
-    if ((match->wc.masks.tp_src && match->wc.masks.tp_src != OVS_BE16_MAX) ||
-        (match->wc.masks.tp_dst && match->wc.masks.tp_dst != OVS_BE16_MAX)) {
-        VLOG_ERR("L4 port only support exact match: tp_src = %x/%x, tp_dst = %x/%x\n", \
-                        match->flow.tp_src, match->wc.masks.tp_src, \
-                        match->flow.tp_dst, match->wc.masks.tp_dst);
-        return -1;
-    }
-
     if (proto == IPPROTO_TCP) {
         struct rte_flow_item_tcp *spec, *mask;
 
