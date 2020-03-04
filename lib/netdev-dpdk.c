@@ -1901,6 +1901,7 @@ netdev_dpdk_vhost_client_set_config(struct netdev *netdev,
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     const char *path;
     int max_tx_retries, cur_max_tx_retries;
+    bool reconf_required = smap_get_bool(args, "reconf", true);
 
     ovs_mutex_lock(&dev->mutex);
     if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
@@ -1914,8 +1915,9 @@ netdev_dpdk_vhost_client_set_config(struct netdev *netdev,
             } else {
                 dev->vhost_driver_flags &= ~RTE_VHOST_USER_DEQUEUE_ZERO_COPY;
             }
-            netdev_request_reconfigure(netdev);
         }
+        if (reconf_required)
+            netdev_request_reconfigure(netdev);
     }
 
     max_tx_retries = smap_get_int(args, "tx-retries-max",

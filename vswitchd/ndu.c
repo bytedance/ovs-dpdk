@@ -475,7 +475,8 @@ struct ndu_tap_fd {
 
 struct ndu_sync_port_attr {
     char name[IF_NAMESIZE];
-    char type[IF_NAMESIZE];
+    /* dpdkvhostuserclient is 19 */
+    char type[IF_NAMESIZE*2];
     odp_port_t portno;
 };
 
@@ -705,7 +706,7 @@ static int ndu_sync_trans_run(struct ndu_sync_trans *trans)
             netdev_close(n);
         }
         ovs_strzcpy(attr.name, dpif_port.name, IF_NAMESIZE);
-        ovs_strzcpy(attr.type, dpif_port.type, IF_NAMESIZE);
+        ovs_strzcpy(attr.type, dpif_port.type, IF_NAMESIZE*2);
         attr.portno = dpif_port.port_no;
         nl_msg_put_unspec(buf, NDU_SYNC_PORT_ATTR, &attr, sizeof(attr));
     }
@@ -824,6 +825,7 @@ static char *state_name[] = {
         [NDU_STATE_SYNC] = "sync",
         [NDU_STATE_FLOW_SYNC] = "flow_sync",
         [NDU_STATE_PMD_PAUSE] = "pmd_pause",
+        [NDU_STATE_VHOST_CONNECT_FORBID] = "vhost_connect_forbid",
         [NDU_STATE_STAGE1_FINISH] = "stage1",
         [NDU_STATE_DATAPATH_RELEASE] = "dp_off",
         [NDU_STATE_DONE] = "done",
@@ -1331,9 +1333,9 @@ static int __ndu_set_pmd_pause(bool set, int64_t *next_cfg)
                 smap_replace(&_new, "pmd-pause", set ? "true" : "false");
                 ovsrec_open_vswitch_set_other_config(cfg, &_new);
                 smap_destroy(&_new);
-            }
-            ovsdb_idl_txn_increment(txn, &cfg->header_,
+                ovsdb_idl_txn_increment(txn, &cfg->header_,
                                     &ovsrec_open_vswitch_col_next_cfg, false);
+            }
         }
         ovsdb_idl_loop_commit_and_wait(&loop);
         poll_block();
@@ -1359,14 +1361,70 @@ static int ndu_clear_pmd_pause(int64_t *next_cfg)
     return __ndu_set_pmd_pause(false, next_cfg);
 }
 
+static int ndu_set_vhostuser_connect(bool set)
+{
+    struct ovsdb_idl *idl =
+        ovsdb_idl_create(ndu_ctx.remote, &ovsrec_idl_class, false, true);
+    struct ovsdb_idl_loop loop = OVSDB_IDL_LOOP_INITIALIZER(idl);
+    ovsdb_idl_add_table(idl, &ovsrec_table_interface);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_options);
+    ovsdb_idl_add_column(idl, &ovsrec_interface_col_type);
+    struct ovsdb_idl_txn *txn = NULL;
+    bool curr;
+    bool need_commit = false;
+
+    while (!txn) {
+        txn = ovsdb_idl_loop_run(&loop);
+        if (txn) {
+            const struct ovsrec_interface *intf =
+                ovsrec_interface_first(idl);
+            for (;intf;intf = ovsrec_interface_next(intf)) {
+                if (!strcmp(intf->type, "dpdkvhostuserclient")) {
+                    curr = smap_get_bool(&intf->options, "reconf", true);
+                    if (curr != set) {
+                        struct smap _new;
+                        smap_init(&_new);
+                        smap_clone(&_new, &intf->options);
+                        smap_replace(&_new, "reconf", set ? "true" : "false");
+                        ovsrec_interface_set_options(intf, &_new);
+                        smap_destroy(&_new);
+                        need_commit = true;
+                    }
+                }
+            }
+        }
+        if (need_commit) {
+            ovsdb_idl_loop_commit_and_wait(&loop);
+            poll_block();
+        }
+    }
+    ovsdb_idl_loop_destroy(&loop);
+    return 0;
+}
+
+static int ndu_forbid_vhostuser_connect(void)
+{
+    return ndu_set_vhostuser_connect(false);
+}
+
+static int ndu_allow_vhostuser_connect(void)
+{
+    return ndu_set_vhostuser_connect(true);
+}
+
 static int ndu_fsm_rollback(struct ndu_fsm *fsm)
 {
     int err;
     switch (fsm->state) {
     case NDU_STATE_STAGE1_FINISH:
+        fsm->state = NDU_STATE_VHOST_CONNECT_FORBID;
+    /* fall through */
+    case NDU_STATE_VHOST_CONNECT_FORBID:
+        err = ndu_allow_vhostuser_connect();
+        if (err)
+            goto err;
         fsm->state = NDU_STATE_PMD_PAUSE;
     /* fall through */
-
     case NDU_STATE_PMD_PAUSE:
         err = ndu_clear_pmd_pause(NULL);
         if (err)
@@ -1512,10 +1570,16 @@ static int ndu_fsm_run_stage1(struct ndu_fsm *fsm)
         err = ndu_set_pmd_pause(NULL);
         if (!err) {
             VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
+            fsm->state = NDU_STATE_VHOST_CONNECT_FORBID;
+        }
+    /* fall through */
+    case NDU_STATE_VHOST_CONNECT_FORBID:
+        err = ndu_forbid_vhostuser_connect();
+        if (!err) {
+            VLOG_INFO("stage1: %s success\n", state_name[fsm->state]);
             fsm->state = NDU_STATE_STAGE1_FINISH;
         }
     /* fall through */
-
     case NDU_STATE_STAGE1_FINISH:
         ndu_flow_trans_destroy(&fsm->ctx.flow_ctx.trans);
         ndu_sync_trans_destroy(&fsm->ctx.sync_ctx.trans);
@@ -2112,6 +2176,7 @@ int ndu_client_before_stage2(void)
             return 0;
         }
         VLOG_INFO("client stage1: ndu recv cmd, start stage2\n");
+        ndu_allow_vhostuser_connect();
         ndu_clear_pmd_pause(NULL);
         client.state = NDU_CLIENT_STATE_FLOW_INSTALL;
     /* fall through */

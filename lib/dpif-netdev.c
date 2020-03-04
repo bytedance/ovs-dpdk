@@ -3374,26 +3374,40 @@ static void
 dp_netdev_pmd_pause(struct dp_netdev *dp)
 {
     struct dp_netdev_pmd_thread *pmd;
+    bool has_pmd = false;
 
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
-        atomic_store_explicit(&pmd->pause, true, memory_order_release);
-        pmd->need_reload = true;
+        if (pmd->core_id != NON_PMD_CORE_ID) {
+            atomic_store_explicit(&pmd->pause, true, memory_order_release);
+            pmd->need_reload = true;
+            has_pmd = true;
+        }
     }
-    reload_affected_pmds(dp);
-    dp->pmd_paused = true;
+
+    if (has_pmd) {
+        reload_affected_pmds(dp);
+        dp->pmd_paused = true;
+    }
 }
 
 static void
 dp_netdev_pmd_resume(struct dp_netdev *dp)
 {
     struct dp_netdev_pmd_thread *pmd;
+    bool has_pmd = false;
 
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
-        atomic_store_explicit(&pmd->pause, false, memory_order_release);
-        pmd->need_reload = true;
+        if (pmd->core_id != NON_PMD_CORE_ID) {
+            atomic_store_explicit(&pmd->pause, false, memory_order_release);
+            pmd->need_reload = true;
+            has_pmd = true;
+        }
     }
-    reload_affected_pmds(dp);
-    dp->pmd_paused = false;
+
+    if (has_pmd) {
+        reload_affected_pmds(dp);
+        dp->pmd_paused = false;
+    }
 }
 
 /* Applies datapath configuration from the database. Some of the changes are
