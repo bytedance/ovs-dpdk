@@ -1393,9 +1393,12 @@ static int ndu_set_vhostuser_connect(bool set)
                 }
             }
         }
-        if (need_commit) {
+        if (!txn || need_commit) {
             ovsdb_idl_loop_commit_and_wait(&loop);
             poll_block();
+        } else {
+            ovsdb_idl_txn_destroy(txn);
+            break;
         }
     }
     ovsdb_idl_loop_destroy(&loop);
