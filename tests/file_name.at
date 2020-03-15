@@ -119,7 +119,7 @@ AT_SKIP_IF([test ! -h a])
 
 AT_CHECK([ovstest test-util follow-symlinks a], [0], [a
 ], [stderr])
-AT_CHECK([sed 's/^[[^|]]*|//' stderr], [0],
-  [00001|util|WARN|a: too many levels of symlinks
+AT_CHECK([sed 's/^[[^|]]*|//' stderr | sed 's/[[0-9|]]*|//'], [0],
+  [util|WARN|a: too many levels of symlinks
 ])
 AT_CLEANUP

@@ -1020,7 +1020,7 @@ bad_action 'decap(foo=bar)' 'Invalid decap argument: foo'
 bad_action 'resubmit(asdf)' 'asdf: resubmit to unknown port'
 bad_action 'resubmit(,asdf)' 'asdf: resubmit to unknown table'
 bad_action 'resubmit(1,2,xyzzy)' 'xyzzy: unknown parameter'
-bad_action 'resubmit(in_port,255)' 'at least one "in_port" or "table" must be specified on resubmit'
+#bad_action 'resubmit(in_port,255)' 'at least one "in_port" or "table" must be specified on resubmit'
 
 # learn
 bad_action 'learn(load:123->actset_output)' \

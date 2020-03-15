@@ -63,8 +63,8 @@ enum vlog_level vlog_get_level_val(const char *name);
 /* Destinations that we can log to. */
 #define VLOG_DESTINATIONS                                                 \
     VLOG_DESTINATION(SYSLOG, "ovs|%05N|%c%T|%p|%m")                        \
-    VLOG_DESTINATION(CONSOLE, "%D{%Y-%m-%dT%H:%M:%SZ}|%05N|%c%T|%P|%p|%m")    \
-    VLOG_DESTINATION(FILE, "%D{%Y-%m-%dT%H:%M:%S.###Z}|%05N|%c%T|%P|%p|%m")
+    VLOG_DESTINATION(CONSOLE, "%D{%Y-%m-%dT%H:%M:%SZ}|%05N|%P|%c%T|%p|%m")    \
+    VLOG_DESTINATION(FILE, "%D{%Y-%m-%dT%H:%M:%S.###Z}|%05N|%P|%c%T|%p|%m")
 enum vlog_destination {
 #define VLOG_DESTINATION(NAME, PATTERN) VLF_##NAME,
     VLOG_DESTINATIONS

@@ -24,7 +24,7 @@ AT_CHECK([
     ovs-appctl netdev-dummy/receive p1 'in_port(1),packet_type(ns=0,id=0),eth(src=3a:6d:d2:09:9c:ab,dst=1e:2c:e9:2a:66:9e),ipv4(src=192.168.10.10,dst=192.168.10.30,proto=1,tos=0,ttl=64,frag=no),icmp(type=8,code=0)'
 ], [0], [ignore])
 
-AT_CHECK([ovs-appctl dpctl/dump-flows | sed 's/used:[[0-9]].[[0-9]]*s/used:0.0/' | sort], [0], [flow-dump from the main thread:
+AT_CHECK([ovs-appctl dpctl/dump-flows | sed 's/used:[[0-9]].[[0-9]]*s/used:0.0/' | sort], [0], [flow-dump from non-dpdk interfaces:
 recirc_id(0),in_port(1),packet_type(ns=0,id=0),eth_type(0x0800),ipv4(frag=no), packets:2, bytes:212, used:0.0, actions:drop
 ])
 
