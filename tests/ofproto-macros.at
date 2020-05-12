@@ -23,7 +23,7 @@ s/dir\/[0-9]*\/br0.mgmt/dir\/XXXX\/br0.mgmt/
 # Use with vconn_sub() and ofctl_strip()
 print_vconn_debug () { awk -F\| < ovs-vswitchd.log '
 BEGIN { prt=0 }
-/\|vconn\|DBG\|/ { sub(/[ \t]*$/, ""); print $3 "|" $4 "|" $5; prt=1; next }
+/\|vconn\|DBG\|/ { sub(/[ \t]*$/, ""); print $4 "|" $5 "|" $6; prt=1; next }
 $4 != "" { prt=0; next }
 prt==1 { sub(/[ \t]*$/, ""); print $0 }
 '
