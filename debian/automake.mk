@@ -9,10 +9,10 @@ EXTRA_DIST += \
 	debian/dirs \
 	debian/libopenvswitch.install \
 	debian/libopenvswitch-dev.install \
-	debian/openvswitch-common.dirs \
-	debian/openvswitch-common.docs \
-	debian/openvswitch-common.install \
-	debian/openvswitch-common.manpages \
+	debian/openvswitch-dpdk-common.dirs \
+	debian/openvswitch-dpdk-common.docs \
+	debian/openvswitch-dpdk-common.install \
+	debian/openvswitch-dpdk-common.manpages \
 	debian/openvswitch-datapath-module-_KVERS_.postinst.modules.in \
 	debian/openvswitch-datapath-dkms.postinst \
 	debian/openvswitch-datapath-dkms.prerm \
@@ -26,16 +26,16 @@ EXTRA_DIST += \
 	debian/openvswitch-pki.dirs \
 	debian/openvswitch-pki.postinst \
 	debian/openvswitch-pki.postrm \
-	debian/openvswitch-switch.README.Debian \
-	debian/openvswitch-switch.dirs \
-	debian/openvswitch-switch.init \
-	debian/openvswitch-switch.install \
-	debian/openvswitch-switch.logrotate \
-	debian/openvswitch-switch.manpages \
-	debian/openvswitch-switch.postinst \
-	debian/openvswitch-switch.postrm \
-	debian/openvswitch-switch.template \
-	debian/openvswitch-switch.links \
+	debian/openvswitch-dpdk-switch.README.Debian \
+	debian/openvswitch-dpdk-switch.dirs \
+	debian/openvswitch-dpdk-switch.init \
+	debian/openvswitch-dpdk-switch.install \
+	debian/openvswitch-dpdk-switch.logrotate \
+	debian/openvswitch-dpdk-switch.manpages \
+	debian/openvswitch-dpdk-switch.postinst \
+	debian/openvswitch-dpdk-switch.postrm \
+	debian/openvswitch-dpdk-switch.template \
+	debian/openvswitch-dpdk-switch.links \
 	debian/openvswitch-test.dirs \
 	debian/openvswitch-test.install \
 	debian/openvswitch-test.manpages \

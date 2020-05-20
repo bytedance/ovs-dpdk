@@ -51,7 +51,7 @@ override_dh_auto_clean:
 override_dh_install-arch:
 	dh_install
 	# openvswitch-switch
-	cp debian/openvswitch-switch.template debian/openvswitch-switch/usr/share/openvswitch/switch/default.template
+	cp debian/openvswitch-dpdk-switch.template debian/openvswitch-dpdk-switch/usr/share/openvswitch/switch/default.template
 
 override_dh_install-indep:
 	dh_install
@@ -86,7 +86,7 @@ override_dh_installinit:
 	dh_installinit -R
 
 override_dh_strip:
-	dh_strip --dbg-package=openvswitch-dbg
+	dh_strip --dbg-package=openvswitch-dpdk-dbg
 
 override_dh_usrlocal:
 

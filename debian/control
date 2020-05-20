@@ -56,18 +56,17 @@ Description: Open vSwitch datapath module source - DKMS version
  that is needed by openvswitch-switch.  DKMS can built the kernel
  module from it.
 
-Package: openvswitch-common
+Package: openvswitch-dpdk-common
 Architecture: linux-any
 Multi-Arch: foreign
 Depends: python3,
          python3-six,
-         libopenvswitch (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
 Suggests: ethtool
-Replaces: openvswitch-switch (<< 2.5.90)
-Breaks: openvswitch-switch (<< 2.5.90)
-Description: Open vSwitch common components
+Replaces: openvswitch-dpdk-switch (<< 2.5.90)
+Breaks: openvswitch-dpdk-switch (<< 2.5.90)
+Description: OVS-DPDK common components
  Open vSwitch is a production quality, multilayer, software-based,
  Ethernet virtual switch. It is designed to enable massive network
  automation through programmatic extension, while still supporting
@@ -96,18 +95,18 @@ Description: Open vSwitch common components
  .
  libopenvswitch provides runtime libraries for use by openvswitch binaries
 
-Package: openvswitch-switch
+Package: openvswitch-dpdk-switch
 Architecture: linux-any
 Suggests: openvswitch-datapath-module
 Depends: kmod | module-init-tools,
          netbase,
-         openvswitch-common (= ${binary:Version}),
+         openvswitch-dpdk-common (= ${binary:Version}),
          procps,
          uuid-runtime,
          ${misc:Depends},
          ${python3:Depends},
          ${shlibs:Depends}
-Description: Open vSwitch switch implementations
+Description: OVS-DPDK switch implementations
  Open vSwitch is a production quality, multilayer, software-based,
  Ethernet virtual switch. It is designed to enable massive network
  automation through programmatic extension, while still supporting
@@ -121,8 +120,8 @@ Description: Open vSwitch switch implementations
 
 Package: openvswitch-pki
 Architecture: all
-Depends: openvswitch-common (<< ${source:Version}.1~),
-         openvswitch-common (>= ${source:Version}),
+Depends: openvswitch-dpdk-common (<< ${source:Version}.1~),
+         openvswitch-dpdk-common (>= ${source:Version}),
          ${misc:Depends}
 Description: Open vSwitch public key infrastructure dependency package
  Open vSwitch is a production quality, multilayer, software-based,
@@ -139,7 +138,7 @@ Description: Open vSwitch public key infrastructure dependency package
 
 Package: openvswitch-testcontroller
 Architecture: linux-any
-Depends: openvswitch-common (= ${binary:Version}),
+Depends: openvswitch-dpdk-common (= ${binary:Version}),
          openvswitch-pki (= ${source:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -149,16 +148,16 @@ Description: Simple controller for testing OpenFlow setups
  testing of OpenFlow networks.  It is not a necessary or desirable
  part of a production OpenFlow deployment.
 
-Package: openvswitch-dbg
+Package: openvswitch-dpdk-dbg
 Section: debug
 Architecture: linux-any
-Depends: openvswitch-common (= ${binary:Version}),
-         openvswitch-switch (= ${binary:Version}),
+Depends: openvswitch-dpdk-common (= ${binary:Version}),
+         openvswitch-dpdk-switch (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
 Conflicts: openvswitch-testcontroller (<< ${binary:Version}),
            openvswitch-testcontroller (>> ${binary:Version})
-Description: Debug symbols for Open vSwitch packages
+Description: Debug symbols for OVS-DPDK packages
  Open vSwitch is a production quality, multilayer, software-based,
  Ethernet virtual switch. It is designed to enable massive network
  automation through programmatic extension, while still supporting
@@ -206,8 +205,8 @@ Description: Open vSwitch test package
 
 Package: openvswitch-vtep
 Architecture: linux-any
-Depends: openvswitch-common (>= ${binary:Version}),
-         openvswitch-switch (>= ${binary:Version}),
+Depends: openvswitch-dpdk-common (>= ${binary:Version}),
+         openvswitch-dpdk-switch (>= ${binary:Version}),
          python3,
          python3-openvswitch (>= ${source:Version}),
          ${misc:Depends},
@@ -248,8 +247,8 @@ Description: Open vSwitch development package
 Package: openvswitch-ipsec
 Architecture: linux-any
 Depends: iproute2,
-         openvswitch-common (= ${binary:Version}),
-         openvswitch-switch (= ${binary:Version}),
+         openvswitch-dpdk-common (= ${binary:Version}),
+         openvswitch-dpdk-switch (= ${binary:Version}),
          python3,
          python3-openvswitch (= ${source:Version}),
          strongswan,
