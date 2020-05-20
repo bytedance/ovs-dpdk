@@ -269,6 +269,7 @@ struct xlate_ctx {
     bool exit;                  /* No further actions should be processed. */
     mirror_mask_t mirrors;      /* Bitmap of associated mirrors. */
     int mirror_snaplen;         /* Max size of a mirror packet in byte. */
+    bool in_mirror_output;
 
    /* Freezing Translation
     * ====================
@@ -2134,7 +2135,9 @@ mirror_packet(struct xlate_ctx *ctx, struct xbundle *xbundle,
         if (out) {
             struct xbundle *out_xbundle = xbundle_lookup(ctx->xcfg, out);
             if (out_xbundle) {
+                ctx->in_mirror_output = true;
                 output_normal(ctx, out_xbundle, &xvlan);
+                ctx->in_mirror_output = false;
             }
         } else if (xvlan.v[0].vid != out_vlan
                    && !eth_addr_is_reserved(ctx->xin->flow.dl_dst)) {
@@ -2145,7 +2148,9 @@ mirror_packet(struct xlate_ctx *ctx, struct xbundle *xbundle,
             LIST_FOR_EACH (xb, list_node, &xbridge->xbundles) {
                 if (xbundle_includes_vlan(xb, &xvlan)
                     && !xbundle_mirror_out(xbridge, xb)) {
+                    ctx->in_mirror_output = true;
                     output_normal(ctx, xb, &xvlan);
+                    ctx->in_mirror_output = false;
                 }
             }
             xvlan.v[0].vid = old_vid;
@@ -4213,7 +4218,7 @@ compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
             native_tunnel_output(ctx, xport, flow, odp_port, truncate);
             flow->tunnel = flow_tnl; /* Restore tunnel metadata */
 
-        } else if (terminate_native_tunnel(ctx, flow, wc,
+        } else if (!ctx->in_mirror_output && terminate_native_tunnel(ctx, flow, wc,
                                            &odp_tnl_port)) {
             /* Intercept packet to be received on native tunnel port. */
             nl_msg_put_odp_port(ctx->odp_actions, OVS_ACTION_ATTR_TUNNEL_POP,
@@ -7451,6 +7456,7 @@ xlate_actions(struct xlate_in *xin, struct xlate_out *xout)
         .exit = false,
         .error = XLATE_OK,
         .mirrors = 0,
+        .in_mirror_output = false,
 
         .freezing = false,
         .recirc_update_dp_hash = false,
