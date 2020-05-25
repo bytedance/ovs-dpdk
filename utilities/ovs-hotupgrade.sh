@@ -22,6 +22,24 @@ save_flows () {
     done
 }
 
+save_routes () {
+    ovs-appctl ovs/route/show | awk '/^User:/{ print $2,$4,$6 }' > "$workdir"/routes
+}
+
+load_routes() {
+    while read -r line; do
+        ovs-appctl ovs/route/add $line
+    done < "$workdir"/routes
+}
+
+get_hugepage_dir() {
+    dir=`ovs-vsctl get open_vswitch . other_config:dpdk-hugepage-dir`
+    ret=`echo $?`
+    if [[ $ret -ne 0 ]]; then
+        dir=`mount | grep huge | awk '{ print $3 }'`
+    fi
+}
+
 pid=`pidof ovs-vswitchd`
 if [ -z "$pid" ]; then
     echo "cannot get ovs-vswitchd pid"
@@ -36,9 +54,24 @@ bridges=$(ovs-vsctl -- --real list-br)
 flows=$(save_flows $bridges)
 #echo $flows
 
+# Save routes
+$(save_routes)
+
+# hugepages dir
+
 ovs-vswitchd unix:/var/run/openvswitch/db.sock -vconsole:emer -vsyslog:err -vfile:info --mlockall --no-chdir --log-file=/var/log/openvswitch/ovs-vswitchd.log --pidfile=/var/run/openvswitch/ovs-vswitchd.pid --detach --monitor
+ret=`echo $?`
 
-newpid=`cat /var/run/openvswitch/ovs-vswitchd.pid`
+if [[ $ret -eq 0 ]]; then
+    newpid=`cat /var/run/openvswitch/ovs-vswitchd.pid`
+    eval "$flows"
+    load_routes
+    ovs-nductl -p $newpid -m start2
+else
+    exit -1
+fi
 
-eval "$flows"
-ovs-nductl -p $newpid -m start2
+get_hugepage_dir
+if [[ -n "$?" ]]; then
+    rm -f $dir/$pid-*
+fi
