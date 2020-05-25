@@ -440,6 +440,25 @@ static int ndu_flow_trans_run(struct ndu_flow_trans *trans)
     struct ndu_flow_stats stats;
 
     for (f = flows; f < &flows[n_dump]; f++) {
+
+        /* not syncing flows with recirc_id or has recir actions */
+        const struct nlattr *a;
+        unsigned int left;
+        bool cont = false;
+        NL_ATTR_FOR_EACH (a, left, f->key, f->key_len) {
+            if (nl_attr_type(a) == OVS_KEY_ATTR_RECIRC_ID
+                    && nl_attr_get_u32(a) != 0) {
+                cont = true;
+            }
+        }
+        NL_ATTR_FOR_EACH (a, left, f->actions, f->actions_len) {
+            if (nl_attr_type(a) == OVS_ACTION_ATTR_RECIRC) {
+                cont = true;
+            }
+        }
+        if (cont)
+            continue;
+
         nl_msg_put_genlmsghdr(buf, 0, NDU_FLOW_FAMILY, 0, 0, OVS_FLOW_VERSION);
         struct nlmsghdr *hdr = buf->base;
         nl_msg_put_unspec(buf, OVS_FLOW_ATTR_KEY, f->key, f->key_len);
