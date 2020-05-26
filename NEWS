@@ -1,19 +1,6 @@
 Post-v2.13.0
 ---------------------
-   - OpenFlow:
-     * The OpenFlow ofp_desc/serial_num may now be configured by setting the
-       value of other-config:dp-sn in the Bridge table.
-     * Added support to watch CONTROLLER port status in fast failover group.
-   - DPDK:
-     * Deprecated DPDK pdump packet capture support removed.
-     * Deprecated DPDK ring ports (dpdkr) are no longer supported.
-   - Linux datapath:
-     * Support for kernel versions up to 5.5.x.
-   - AF_XDP:
-     * New netdev class 'afxdp-nonpmd' for netdev-afxdp to save CPU cycles
-       by enabling interrupt mode.
-   - Userspace datapath:
-     * Add support for conntrack zone-based timeout policy.
+   - ovs-vswitchd no longer deletes datapath flows on exit by default.
 
 
 v2.13.0 - xx xxx xxxx

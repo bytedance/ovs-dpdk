@@ -17,7 +17,6 @@
 #include <config.h>
 
 #include "conntrack-private.h"
-#include "conntrack-tp.h"
 #include "dp-packet.h"
 
 enum OVS_PACKED_ENUM other_state {
@@ -70,13 +69,12 @@ other_valid_new(struct dp_packet *pkt OVS_UNUSED)
 
 static struct conn *
 other_new_conn(struct conntrack *ct, struct dp_packet *pkt OVS_UNUSED,
-               long long now, uint32_t tp_id)
+               long long now)
 {
     struct conn_other *conn;
 
     conn = xzalloc(sizeof *conn);
     conn->state = OTHERS_FIRST;
-    conn->up.tp_id = tp_id;
 
     conn_init_expiration(ct, &conn->up, other_timeouts[conn->state], now);
 
