@@ -99,8 +99,12 @@ m4_define([CHECK_CONNTRACK_NAT])
 # CHECK_CONNTRACK_TIMEOUT()
 #
 # Perform requirements checks for running conntrack customized timeout tests.
+* The userspace datapath does not support this feature yet.
 #
-m4_define([CHECK_CONNTRACK_TIMEOUT])
+m4_define([CHECK_CONNTRACK_TIMEOUT],
+[
+    AT_SKIP_IF([:])
+])
 
 # CHECK_CT_DPIF_SET_GET_MAXCONNS()
 #

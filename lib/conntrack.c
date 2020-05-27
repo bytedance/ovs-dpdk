@@ -25,7 +25,6 @@
 #include "bitmap.h"
 #include "conntrack.h"
 #include "conntrack-private.h"
-#include "conntrack-tp.h"
 #include "coverage.h"
 #include "csum.h"
 #include "ct-dpif.h"
@@ -90,8 +89,7 @@ static uint32_t conn_key_hash(const struct conn_key *, uint32_t basis);
 static void conn_key_reverse(struct conn_key *);
 static bool valid_new(struct dp_packet *pkt, struct conn_key *);
 static struct conn *new_conn(struct conntrack *ct, struct dp_packet *pkt,
-                             struct conn_key *, long long now,
-                             uint32_t tp_id);
+                             struct conn_key *, long long now);
 static void delete_conn_cmn(struct conn *);
 static void delete_conn(struct conn *);
 static void delete_conn_one(struct conn *conn);
@@ -176,6 +174,12 @@ static alg_helper alg_helpers[] = {
     [CT_ALG_CTL_NONE] = NULL,
     [CT_ALG_CTL_FTP] = handle_ftp_ctl,
     [CT_ALG_CTL_TFTP] = handle_tftp_ctl,
+};
+
+long long ct_timeout_val[] = {
+#define CT_TIMEOUT(NAME, VAL) [CT_TM_##NAME] = VAL,
+    CT_TIMEOUTS
+#undef CT_TIMEOUT
 };
 
 /* The maximum TCP or UDP port number. */
@@ -309,7 +313,6 @@ conntrack_init(void)
     }
     hmap_init(&ct->zone_limits);
     ct->zone_limit_seq = 0;
-    timeout_policy_init(ct);
     ovs_mutex_unlock(&ct->ct_lock);
 
     ct->hash_basis = random_uint32();
@@ -499,12 +502,6 @@ conntrack_destroy(struct conntrack *ct)
         free(zl);
     }
     hmap_destroy(&ct->zone_limits);
-
-    struct timeout_policy *tp;
-    HMAP_FOR_EACH_POP (tp, node, &ct->timeout_policies) {
-        free(tp);
-    }
-    hmap_destroy(&ct->timeout_policies);
 
     ovs_mutex_unlock(&ct->ct_lock);
     ovs_mutex_destroy(&ct->ct_lock);
@@ -960,7 +957,7 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
                struct conn_lookup_ctx *ctx, bool commit, long long now,
                const struct nat_action_info_t *nat_action_info,
                const char *helper, const struct alg_exp_node *alg_exp,
-               enum ct_alg_ctl_type ct_alg_ctl, uint32_t tp_id)
+               enum ct_alg_ctl_type ct_alg_ctl)
     OVS_REQUIRES(ct->ct_lock)
 {
     struct conn *nc = NULL;
@@ -991,7 +988,7 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
             return nc;
         }
 
-        nc = new_conn(ct, pkt, &ctx->key, now, tp_id);
+        nc = new_conn(ct, pkt, &ctx->key, now);
         memcpy(&nc->key, &ctx->key, sizeof nc->key);
         memcpy(&nc->rev_key, &nc->key, sizeof nc->rev_key);
         conn_key_reverse(&nc->rev_key);
@@ -1279,8 +1276,7 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
             bool force, bool commit, long long now, const uint32_t *setmark,
             const struct ovs_key_ct_labels *setlabel,
             const struct nat_action_info_t *nat_action_info,
-            ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper,
-            uint32_t tp_id)
+            ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper)
 {
     /* Reset ct_state whenever entering a new zone. */
     if (pkt->md.ct_state && pkt->md.ct_zone != zone) {
@@ -1364,7 +1360,7 @@ process_one(struct conntrack *ct, struct dp_packet *pkt,
         ovs_mutex_lock(&ct->ct_lock);
         if (!conn_lookup(ct, &ctx->key, now, NULL, NULL)) {
             conn = conn_not_found(ct, pkt, ctx, commit, now, nat_action_info,
-                                  helper, alg_exp, ct_alg_ctl, tp_id);
+                                  helper, alg_exp, ct_alg_ctl);
         }
         ovs_mutex_unlock(&ct->ct_lock);
     }
@@ -1400,7 +1396,7 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
                   const struct ovs_key_ct_labels *setlabel,
                   ovs_be16 tp_src, ovs_be16 tp_dst, const char *helper,
                   const struct nat_action_info_t *nat_action_info,
-                  long long now, uint32_t tp_id)
+                  long long now)
 {
     ipf_preprocess_conntrack(ct->ipf, pkt_batch, now, dl_type, zone,
                              ct->hash_basis);
@@ -1422,8 +1418,7 @@ conntrack_execute(struct conntrack *ct, struct dp_packet_batch *pkt_batch,
             write_ct_md(packet, zone, NULL, NULL, NULL);
         } else {
             process_one(ct, packet, &ctx, zone, force, commit, now, setmark,
-                        setlabel, nat_action_info, tp_src, tp_dst, helper,
-                        tp_id);
+                        setlabel, nat_action_info, tp_src, tp_dst, helper);
         }
     }
 
@@ -1529,7 +1524,7 @@ conntrack_clean(struct conntrack *ct, long long now)
     atomic_read_relaxed(&ct->n_conn_limit, &n_conn_limit);
     size_t clean_max = n_conn_limit > 10 ? n_conn_limit / 10 : 1;
     long long min_exp = ct_sweep(ct, now, clean_max);
-    long long next_wakeup = MIN(min_exp, now + CT_DPIF_NETDEV_TP_MIN);
+    long long next_wakeup = MIN(min_exp, now + CT_TM_MIN);
 
     return next_wakeup;
 }
@@ -2359,9 +2354,9 @@ valid_new(struct dp_packet *pkt, struct conn_key *key)
 
 static struct conn *
 new_conn(struct conntrack *ct, struct dp_packet *pkt, struct conn_key *key,
-         long long now, uint32_t tp_id)
+         long long now)
 {
-    return l4_protos[key->nw_proto]->new_conn(ct, pkt, now, tp_id);
+    return l4_protos[key->nw_proto]->new_conn(ct, pkt, now);
 }
 
 static void
