@@ -506,3 +506,140 @@ dp_packet_resize_l2(struct dp_packet *b, int increment)
     dp_packet_adjust_layer_offset(&b->l2_5_ofs, increment);
     return dp_packet_data(b);
 }
+
+#ifdef DPDK_NETDEV
+static inline uint8_t
+ipv4_get_nw_frag(const struct ip_header *nh)
+{
+    uint8_t nw_frag = 0;
+
+    if (OVS_UNLIKELY(IP_IS_FRAGMENT(nh->ip_frag_off))) {
+        nw_frag = FLOW_NW_FRAG_ANY;
+        if (nh->ip_frag_off & htons(IP_FRAG_OFF_MASK)) {
+            nw_frag |= FLOW_NW_FRAG_LATER;
+        }
+    }
+
+    return nw_frag;
+}
+
+#include <netinet/ip6.h>
+#define PKT_TX_V4L4_MASK (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_L4_MASK | PKT_TX_TCP_SEG)
+#define PKT_TX_V6L4_MASK (PKT_TX_IPV6 | PKT_TX_L4_MASK | PKT_TX_TCP_SEG)
+bool dp_packet_hwol_set_len(struct dp_packet *p)
+{
+    const struct eth_header *eth = dp_packet_eth(p);
+    if (!eth) {
+        goto l2_out;
+    }
+
+    p->mbuf.l2_len = ETH_HEADER_LEN;
+    if (!dp_packet_l3(p)) {
+        goto l3_out;
+    }
+
+    uint8_t nw_frag = 0;
+    uint8_t nw_proto = 0;
+    size_t nw_size = 0;
+    size_t size = dp_packet_size(p);
+    struct ip_header *ip = NULL;
+    size -= ETH_HEADER_LEN;
+
+    if (eth->eth_type == htons(ETH_TYPE_IP)) {
+        ip = dp_packet_l3(p);
+        nw_size = htons(ip->ip_tot_len);
+        if (nw_size != size) {
+            goto l3_out;
+        }
+
+        if (p->mbuf.ol_flags & PKT_TX_IP_CKSUM) {
+            ip->ip_csum = 0;
+        }
+
+        nw_frag = ipv4_get_nw_frag(ip);
+        nw_proto = ip->ip_proto;
+        p->mbuf.l3_len = IP_IHL(ip->ip_ihl_ver) * 4;
+        p->mbuf.ol_flags |= PKT_TX_IPV4;
+    }
+
+    if (eth->eth_type == htons(ETH_TYPE_IPV6)) {
+        const struct ovs_16aligned_ip6_hdr *nh = dp_packet_l3(p);
+        nw_size = ntohs(nh->ip6_plen);
+        if (nw_size + IPV6_HEADER_LEN != size) {
+            goto l3_out;
+        }
+
+        const void *data = nh;
+        nw_proto = nh->ip6_nxt;
+        const struct ovs_16aligned_ip6_frag *frag_hdr;
+        if(!parse_ipv6_ext_hdrs(&data, &nw_size, &nw_proto, &nw_frag, &frag_hdr)) {
+            goto l3_out;
+        }
+        p->mbuf.ol_flags |= PKT_TX_IPV6;
+        p->mbuf.l3_len = size - nw_size;
+    }
+
+    if (OVS_LIKELY(nw_proto && !(nw_frag & FLOW_NW_FRAG_ANY) && dp_packet_l4(p))) {
+        if (nw_proto == IPPROTO_TCP && p->mbuf.ol_flags & PKT_TX_TCP_SEG) {
+            struct tcp_header *th = dp_packet_l4(p);
+            p->mbuf.l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
+            p->mbuf.ol_flags |= PKT_TX_TCP_CKSUM;
+            if(ip && ip->ip_csum) {
+                ip->ip_csum = 0;
+                p->mbuf.ol_flags |= PKT_TX_IP_CKSUM;
+            }
+        }
+        if (nw_proto == IPPROTO_TCP) {
+            struct tcp_header *th = dp_packet_l4(p);
+            if (p->mbuf.ol_flags & PKT_TX_IPV4)
+                th->tcp_csum = packet_csum_pseudoheader(dp_packet_l3(p));
+            if (p->mbuf.ol_flags & PKT_TX_IPV6)
+                th->tcp_csum = packet_csum_pseudoheader6(dp_packet_l3(p));
+            p->mbuf.l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
+            p->mbuf.ol_flags |= PKT_TX_TCP_CKSUM;
+        }
+        if (nw_proto == IPPROTO_UDP) {
+            struct udp_header *uh = dp_packet_l4(p);
+            if (p->mbuf.ol_flags & PKT_TX_IPV4)
+                uh->udp_csum = packet_csum_pseudoheader(dp_packet_l3(p));
+            if (p->mbuf.ol_flags & PKT_TX_IPV6)
+                uh->udp_csum = packet_csum_pseudoheader6(dp_packet_l3(p));
+            p->mbuf.l4_len = sizeof(struct udp_header);
+            p->mbuf.ol_flags |= PKT_TX_UDP_CKSUM;
+        }
+    } else {
+        p->mbuf.l4_len = 0;
+        p->mbuf.ol_flags &= ~(PKT_TX_TCP_CKSUM | PKT_TX_UDP_CKSUM | PKT_TX_TCP_SEG);
+    }
+    return true;
+
+l2_out:
+    p->mbuf.l2_len = 0;
+l3_out:
+    p->mbuf.ol_flags &= ~(PKT_TX_V4L4_MASK | PKT_TX_V6L4_MASK);
+    p->mbuf.l3_len = 0;
+    p->mbuf.l4_len = 0;
+    return false;
+}
+
+void dp_packet_hwol_set_vxlan4(struct dp_packet *p)
+{
+    p->mbuf.ol_flags |= (PKT_TX_OUTER_IPV4 | PKT_TX_OUTER_IP_CKSUM | PKT_TX_TUNNEL_VXLAN);
+    p->mbuf.outer_l2_len = ETH_HEADER_LEN;
+    p->mbuf.outer_l3_len = IP_HEADER_LEN;
+    /* adjust inner len */
+    if(dp_packet_hwol_set_len(p))
+        p->mbuf.l2_len += sizeof(struct vxlanhdr) + sizeof(struct udp_header);
+}
+
+void dp_packet_hwol_set_vxlan6(struct dp_packet *p)
+{
+    p->mbuf.ol_flags |= (PKT_TX_OUTER_IPV6 | PKT_TX_TUNNEL_VXLAN);
+    p->mbuf.outer_l2_len = ETH_HEADER_LEN;
+    p->mbuf.outer_l3_len = IPV6_HEADER_LEN;
+    /* adjust inner len */
+    if(dp_packet_hwol_set_len(p))
+        p->mbuf.l2_len += sizeof(struct vxlanhdr) + sizeof(struct udp_header);
+}
+#endif
+

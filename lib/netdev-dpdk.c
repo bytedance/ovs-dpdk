@@ -150,9 +150,11 @@ typedef uint16_t dpdk_port_t;
  * if TSO is enabled. Ideally this should include DEV_TX_OFFLOAD_SCTP_CKSUM.
  * However, very few drivers supports that the moment and SCTP is not a
  * widely used protocol as TCP and UDP, so it's optional. */
-#define DPDK_TX_TSO_OFFLOAD_FLAGS (DEV_TX_OFFLOAD_TCP_TSO        \
-                                   | DEV_TX_OFFLOAD_TCP_CKSUM    \
-                                   | DEV_TX_OFFLOAD_UDP_CKSUM    \
+#define DPDK_TX_TSO_OFFLOAD_FLAGS (DEV_TX_OFFLOAD_TCP_TSO            \
+                                   | DEV_TX_OFFLOAD_TCP_CKSUM        \
+                                   | DEV_TX_OFFLOAD_UDP_CKSUM        \
+                                   | DEV_TX_OFFLOAD_VXLAN_TNL_TSO    \
+                                   | DEV_TX_OFFLOAD_OUTER_IPV4_CKSUM \
                                    | DEV_TX_OFFLOAD_IPV4_CKSUM)
 
 
@@ -2139,31 +2141,23 @@ netdev_dpdk_rxq_dealloc(struct netdev_rxq *rxq)
 static bool
 netdev_dpdk_prep_hwol_packet(struct netdev_dpdk *dev, struct rte_mbuf *mbuf)
 {
+    if (mbuf->ol_flags & PKT_TX_TUNNEL_VXLAN) {
+        if (mbuf->ol_flags & PKT_TX_TCP_SEG) {
+            mbuf->tso_segsz = dev->mtu - mbuf->l3_len - mbuf->l4_len - VXLAN_HDR_OVERHEAD;
+        }
+        return true;
+    }
+
     struct dp_packet *pkt = CONTAINER_OF(mbuf, struct dp_packet, mbuf);
+    dp_packet_hwol_set_len(pkt);
 
     if (mbuf->ol_flags & PKT_TX_L4_MASK) {
-        mbuf->l2_len = (char *)dp_packet_l3(pkt) - (char *)dp_packet_eth(pkt);
-        mbuf->l3_len = (char *)dp_packet_l4(pkt) - (char *)dp_packet_l3(pkt);
         mbuf->outer_l2_len = 0;
         mbuf->outer_l3_len = 0;
     }
 
     if (mbuf->ol_flags & PKT_TX_TCP_SEG) {
-        struct tcp_header *th = dp_packet_l4(pkt);
-
-        if (!th) {
-            VLOG_WARN_RL(&rl, "%s: TCP Segmentation without L4 header"
-                         " pkt len: %"PRIu32"", dev->up.name, mbuf->pkt_len);
-            return false;
-        }
-
-        mbuf->l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
-        mbuf->ol_flags |= PKT_TX_TCP_CKSUM;
         mbuf->tso_segsz = dev->mtu - mbuf->l3_len - mbuf->l4_len;
-
-        if (mbuf->ol_flags & PKT_TX_IPV4) {
-            mbuf->ol_flags |= PKT_TX_IP_CKSUM;
-        }
     }
     return true;
 }

@@ -963,6 +963,7 @@ netdev_push_header(const struct netdev *netdev,
     size_t i, size = dp_packet_batch_size(batch);
 
     DP_PACKET_BATCH_REFILL_FOR_EACH (i, size, packet, batch) {
+#ifndef DPDK_NETDEV
         if (OVS_UNLIKELY(dp_packet_hwol_is_tso(packet)
                          || dp_packet_hwol_l4_mask(packet))) {
             COVERAGE_INC(netdev_push_header_drops);
@@ -975,6 +976,11 @@ netdev_push_header(const struct netdev *netdev,
             pkt_metadata_init(&packet->md, data->out_port);
             dp_packet_batch_refill(batch, packet, i);
         }
+#else
+        netdev->netdev_class->push_header(netdev, packet, data);
+        pkt_metadata_init(&packet->md, data->out_port);
+        dp_packet_batch_refill(batch, packet, i);
+#endif
     }
 
     return 0;

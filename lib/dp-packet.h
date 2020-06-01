@@ -1060,6 +1060,13 @@ dp_packet_l4_checksum_bad(const struct dp_packet *p)
             DP_PACKET_OL_RX_L4_CKSUM_BAD;
 }
 
+#ifdef DPDK_NETDEV
+#define VXLAN_HDR_OVERHEAD 50
+bool dp_packet_hwol_set_len(struct dp_packet *p);
+void dp_packet_hwol_set_vxlan4(struct dp_packet *p);
+void dp_packet_hwol_set_vxlan6(struct dp_packet *p);
+#endif
+
 #ifdef  __cplusplus
 }
 #endif

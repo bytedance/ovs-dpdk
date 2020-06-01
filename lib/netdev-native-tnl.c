@@ -45,6 +45,7 @@
 #include "unaligned.h"
 #include "unixctl.h"
 #include "openvswitch/vlog.h"
+#include "userspace-tso.h"
 
 VLOG_DEFINE_THIS_MODULE(native_tnl);
 static struct vlog_rate_limit err_rl = VLOG_RATE_LIMIT_INIT(60, 5);
@@ -150,6 +151,15 @@ netdev_tnl_push_ip_header(struct dp_packet *packet,
     struct eth_header *eth;
     struct ip_header *ip;
     struct ovs_16aligned_ip6_hdr *ip6;
+#ifdef DPDK_NETDEV
+    if (userspace_tso_enabled()) {
+        if (!netdev_tnl_is_header_ipv6(header)) {
+            dp_packet_hwol_set_vxlan4(packet);
+        } else {
+            dp_packet_hwol_set_vxlan6(packet);
+        }
+    }
+#endif
 
     eth = dp_packet_push_uninit(packet, size);
     *ip_tot_size = dp_packet_size(packet) - sizeof (struct eth_header);
@@ -169,7 +179,14 @@ netdev_tnl_push_ip_header(struct dp_packet *packet,
     } else {
         ip = netdev_tnl_ip_hdr(eth);
         ip->ip_tot_len = htons(*ip_tot_size);
+#ifdef DPDK_NETDEV
+        if (userspace_tso_enabled())
+            ip->ip_csum = 0;
+        else
+            ip->ip_csum = recalc_csum16(ip->ip_csum, 0, ip->ip_tot_len);
+#else
         ip->ip_csum = recalc_csum16(ip->ip_csum, 0, ip->ip_tot_len);
+#endif
         *ip_tot_size -= IP_HEADER_LEN;
         packet->l4_ofs = dp_packet_size(packet) - *ip_tot_size;
         return ip + 1;
@@ -228,6 +245,12 @@ netdev_tnl_push_udp_header(const struct netdev *netdev OVS_UNUSED,
     udp->udp_src = netdev_tnl_get_src_port(packet);
     udp->udp_len = htons(ip_tot_size);
 
+#ifdef DPDK_NETDEV
+    if (userspace_tso_enabled()) {
+        udp->udp_csum = 0;
+        return;
+    }
+#endif
     if (udp->udp_csum) {
         uint32_t csum;
         if (netdev_tnl_is_header_ipv6(dp_packet_data(packet))) {
