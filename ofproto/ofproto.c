@@ -1695,14 +1695,28 @@ ofproto_destroy__(struct ofproto *ofproto)
     ofproto->ofproto_class->dealloc(ofproto);
 }
 
+static void
+ofproto_destroy_defer__3(struct ofproto *ofproto)
+    OVS_EXCLUDED(ofproto_mutex)
+{
+    ovsrcu_postpone(ofproto_destroy__, ofproto);
+}
+
+static void
+ofproto_destroy_defer__2(struct ofproto *ofproto)
+    OVS_EXCLUDED(ofproto_mutex)
+{
+    ovsrcu_postpone(ofproto_destroy_defer__3, ofproto);
+}
+
 /* Destroying rules is doubly deferred, must have 'ofproto' around for them.
  * - 1st we defer the removal of the rules from the classifier
  * - 2nd we defer the actual destruction of the rules. */
 static void
-ofproto_destroy_defer__(struct ofproto *ofproto)
+ofproto_destroy_defer__1(struct ofproto *ofproto)
     OVS_EXCLUDED(ofproto_mutex)
 {
-    ovsrcu_postpone(ofproto_destroy__, ofproto);
+    ovsrcu_postpone(ofproto_destroy_defer__2, ofproto);
 }
 
 void
@@ -1737,7 +1751,7 @@ ofproto_destroy(struct ofproto *p, bool del)
     ovs_mutex_unlock(&ofproto_mutex);
 
     /* Destroying rules is deferred, must have 'ofproto' around for them. */
-    ovsrcu_postpone(ofproto_destroy_defer__, p);
+    ovsrcu_postpone(ofproto_destroy_defer__1, p);
 }
 
 /* Destroys the datapath with the respective 'name' and 'type'.  With the Linux
