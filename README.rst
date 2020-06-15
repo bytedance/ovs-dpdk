@@ -2,6 +2,33 @@
    start-after/end-before lines found in 'Documentation/intro/what-is-ovs'
    are kept up-to-date.
 
+Introduction
+-----------
+
+This is a fork of Open vSwitch. In this code repo, we focus on the DPDK based Open vSwitch including our own bugfixes and feature enhancements.
+
+Currently, we have implemeneted a non-distrupted upgrade for ovs-dpdk running on Mellenox CX5 NICs.
+
+We've also implemented VXLAN decap/encap NIC offloading in the code. The impelementation is different from the community version, because at the time the community repo does not support this.
+
+For the bugfixes and other features in developing, we will first introduce them into this repo and then try to contribute to the OVS community.
+
+The reason we open source this repo is to try to have devoloping agility for our internal services, while not closing the door from the upstream community.
+
+We will update this fork to merge the bugfixes code from the upstream community from time to time, and we welcome anyone provide feedbacks or suggestions to us.
+
+Feature
+------
+
+* Non-distrupted upgrade on MLNX nics (cx4/cx5)
+* VXLAN decap/encap full offload, (tested on cx5)
+* VXLAN TSO
+* Partial offload is currently removed, but will be added back if needed.
+
+Contact
+-------
+hepeng.0320@bytedance.com
+
 ============
 Open vSwitch
 ============
