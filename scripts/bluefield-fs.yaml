@@ -1,0 +1,137 @@
+- hosts: bluefield
+  remote_user: root
+  vars:
+      bfdir: /root/bluefield
+      bfdir_inst: "{{ bfdir }}/BlueField-2.5.1.11213"
+      file_server:
+  tasks:
+  - name: test if bluefield exist   
+    shell: lspci | grep "BlueField integrated ConnectX-5" || false 
+  - stat:
+      path: "{{ bfdir }}"
+    register: st
+  - name: mkdir bluefield dir
+    file:
+        path: "{{ bfdir }}"
+        state: directory
+        mode: '0755'
+    when: st.stat.path is not defined
+  - stat:
+      path: "{{ bfdir }}/BlueField-2.5.1.11213.tar.xz"
+    register: bftar_st
+  - name: download ofed and drivers
+    get_url:
+        url: "http://{{ file_server }}/BlueField-2.5.1.11213.tar.xz"
+        dest: "{{ bfdir }}"
+        mode: '0440'
+    when: bftar_st.stat.path is not defined
+  - stat:
+      path: "{{ bfdir }}/MLNX_OFED_LINUX-5.0-2.1.8.0-debian8.11-x86_64.tgz"
+    register: mlnx_st
+  - name: download ofed and drivers
+    get_url:
+        url: "http://{{ file_server }}/MLNX_OFED_LINUX-5.0-2.1.8.0-debian8.11-x86_64.tgz"
+        dest: "{{ bfdir }}"
+        mode: '0440'
+    when: mlnx_st.stat.path is not defined
+  - stat:
+      path: "{{ bfdir }}/mft-4.14.0-105-x86_64-deb.tgz"
+    register: mft_st
+  - name: download ofed and drivers
+    get_url:
+        url: "http://{{ file_server }}/mft-4.14.0-105-x86_64-deb.tgz"
+        dest: "{{ bfdir }}"
+        mode: '0440'
+    when: mft_st.stat.path is not defined
+  - stat:
+      path: "{{ bfdir }}/core-image-full-dev-BlueField-2.5.1.11213.2.5.3.tar.xz"
+    register: ci_st
+  - name: download ofed and drivers
+    get_url:
+        url: "http://{{ file_server }}/core-image-full-dev-BlueField-2.5.1.11213.2.5.3.tar.xz"
+        dest: "{{ bfdir }}"
+        mode: '0440'
+    when: ci_st.stat.path is not defined
+  - stat:
+      path: "{{ bfdir }}/BlueField-2.5.1.11213"
+    register: bf_st
+  - name: extract BlueField 
+    unarchive:
+        src:  "{{ bfdir }}/BlueField-2.5.1.11213.tar.xz"
+        dest: "{{ bfdir }}"
+        remote_src: yes
+    when: bf_st.stat.path is not defined
+  - debug: var=vars.ansible_interfaces
+  - name: check if rshim exist
+    shell: modprobe rshim_net
+    ignore_errors: True
+    register: rshim_rc
+  - name: check if kernel-devel installed
+    apt:
+        name: linux-headers
+        state: present
+    when: rshim_rc.rc == 1
+  - name: install rshim
+    shell: dkms add rshim.conf; dkms install -m rshim -v 0.2; modprobe rshim_net; modprobe rshim_pcie
+    args:
+        chdir: "{{ bfdir_inst }}/src/drivers/rshim"
+    when: rshim_rc.rc == 1
+  - name: install install.bfb
+    shell: cat "{{ bfdir_inst }}/sample/install.bfb" > /dev/rshim0/boot
+    tags: cat_bfb
+  - name: setup the tmfifo_net0 
+    shell: ip link set tmfifo_net0 up; ip addr add 192.168.100.1/24 dev tmfifo_net0
+    ignore_errors: True
+  - name: remove old 192.168.100.2 key if exists
+    shell: ssh-keygen -f "/root/.ssh/known_hosts" -R 192.168.100.2
+    ignore_errors: True
+  - name: wait 192.168.100.2 is ready
+    shell: ping 192.168.100.2 -c 3 
+    register: ping_rt
+    until: ping_rt.rc == 0
+    retries: 6 
+    delay: 15
+  - name: wait 192.168.100.2 ssh 
+    shell: nc 192.168.100.2 22 -v -z
+    register: nc_rt
+    until: nc_rt.rc == 0
+    retries: 6
+    delay: 15
+  - name: copy image into bluefield card 
+    shell: scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ bfdir }}/core-image-full-dev-BlueField-2.5.1.11213.2.5.3.tar.xz" root@192.168.100.2:/tmp/
+    tags: inst_bf_images
+  - name: install core-image in bluefield card
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 '/opt/mlnx/scripts/bfinst --fullfs /tmp/core-image-full-dev-BlueField-2.5.1.11213.2.5.3.tar.xz'
+    tags: inst_bf_images
+  - name: install mlnx
+    block:
+      - stat:
+          path: "{{ bfdir }}/MLNX_OFED_LINUX-5.0-2.1.8.0-debian8.11-x86_64"
+        register: mlnx_st
+      - name: unarchiving OFED install tar package
+        unarchive:
+            src: "{{ bfdir }}/MLNX_OFED_LINUX-5.0-2.1.8.0-debian8.11-x86_64.tgz"
+            dest: "{{ bfdir }}"
+            remote_src: yes
+        when: mlnx_st.stat.path is not defined
+      - name: install python-pip
+        apt:
+          name: python-pip
+      - name: install pexpect
+        pip:
+          name: pexpect
+      - name: installing OFED
+        expect:
+          command: ./mlnxofedinstall --dpdk --upstream-libs --skip-distro-check
+          chdir: "{{ bfdir}}/MLNX_OFED_LINUX-5.0-2.1.8.0-debian8.11-x86_64/"
+          echo: yes
+          timeout: null
+          responses:
+            "continue?": 'y'
+  - name: reboot smartNIC
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 'reboot'
+  - name: reboot -f
+    shell: reboot -f 
+    poll: 0
+    async: 1
+

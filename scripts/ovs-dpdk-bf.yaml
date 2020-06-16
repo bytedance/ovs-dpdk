@@ -1,0 +1,103 @@
+- hosts: bluefield
+  remote_user: root
+  vars:
+      bfdir: /root/bluefield
+      ovsdpdk: https://github.com/bytedance/ovs-dpdk
+      dpdk: http://dpdk.org/git/dpdk-stable
+  tasks:
+  - name: ping test
+    ping:
+  - name: setup link
+    shell: ip link set tmfifo_net0 up; ip addr add 192.168.100.1/24 dev tmfifo_net0
+    ignore_errors: yes
+  - stat:
+        path: "{{ bfdir }}/ovs-dpdk"
+    register: ovs_st
+  - name: fetch ovs-dpdk from repo
+    git:
+        repo: "{{ ovsdpdk }}"
+        dest: "{{ bfdir }}/ovs-dpdk"
+        version: open-source
+    when: ovs_st.stat.path is not defined
+  - name: archiving ovs-dpdk
+    archive:
+        path: "{{ bfdir }}/ovs-dpdk"
+        dest: "{{ bfdir }}/ovs-dpdk.tgz"
+    tags: archive 
+  - stat:
+        path: "{{ bfdir }}/dpdk"
+    register: dpdk_st
+  - name: fetch dpdk from repo
+    git:
+        repo: "{{ dpdk }}"
+        dest: "{{ bfdir }}/dpdk"
+        version: 19.11
+    when: dpdk_st.stat.path is not defined
+  - name: archiving dpdk
+    archive:
+        path: "{{ bfdir }}/dpdk"
+        dest: "{{ bfdir }}/dpdk.tgz"
+    tags: archive
+  - name: copy dpdk into bf card
+    shell: scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ bfdir }}/dpdk.tgz" root@192.168.100.2:/home/
+    tags: copy
+  - name: copy ovs into bf card
+    shell: scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "{{ bfdir }}/ovs-dpdk.tgz" root@192.168.100.2:/home/
+    tags: copy
+  - name: show date
+    debug:
+        msg: "{{ now() }}"
+  - name: set date
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "date -s '{{ now() }}'"
+  - name: killing running ovs
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "ovs-appctl -t ovs-vswitchd exit"
+    ignore_errors: yes
+  - name: killing running ovsdb
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "ovs-appctl -t ovsdb-server exit"
+    ignore_errors: yes
+  - name: unarchive dpdk
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home; tar xzf dpdk.tgz"
+    tags: unarchive
+  - name: unarchive ovs
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home; tar xzf ovs-dpdk.tgz"
+    tags: unarchive
+  - name: remove existing dpdk
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "rm -rf /usr/include/rte_*; rm -rf /usr/lib64/libdpdk*; rm -rf /usr/lib64/librte_*"
+  - name: make dpdk
+    shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home/dpdk; make T=arm64-armv8a-linux-gcc config; cd build; make -j 8"
+    tags: make
+  - name: make ovs
+    block:
+        - shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home/ovs-dpdk; ./boot.sh"
+        - shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home/ovs-dpdk; ./configure --with-dpdk=/home/dpdk/build --with-rundir=/var/run/openvswitch --with-pkidir=/var/lib/openvswitch/pki --with-logdir=/var/log/openvswitch --prefix=/usr"
+        - shell: ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@192.168.100.2 "cd /home/ovs-dpdk; make install -j"
+    tags: make
+  - name: mft stat
+    stat:
+      path: "{{ bfdir }}/mft-4.14.0-105-x86_64-deb"
+    register: mft_st
+  - name: mft unarchive
+    unarchive:
+      src: "{{ bfdir }}/mft-4.14.0-105-x86_64-deb.tgz"
+      dest: "{{ bfdir }}"
+      remote_src: yes
+    when: mft_st.stat.path is not defined
+  - name: install mft
+    shell: ./install.sh
+    args:
+      chdir: "{{ bfdir }}/mft-4.14.0-105-x86_64-deb"
+  - name: check nic mode
+    shell: mst start; mlxconfig -d /dev/mst/mt41682_pciconf0 q | grep -i model
+    register: nic_rt
+  - debug: var=nic_rt
+  - block:
+        - name: change to embedded mode 
+          shell: mst start; mlxconfig -y -d /dev/mst/mt41682_pciconf0 s INTERNAL_CPU_MODEL=1; mlxconfig -y -d /dev/mst/mt41682_pciconf0.1 s INTERNAL_CPU_MODEL=1;
+        - name: enable SRIOV
+          shell: mlxconfig -y -d /dev/mst/mt41682_pciconf0 s SRIOV_EN=1
+        - name: reboot
+          shell: reboot -f
+          poll: 0
+          async: 1
+    when: nic_rt.stdout.find('EMBEDDED_CPU(1)') == -1
+
