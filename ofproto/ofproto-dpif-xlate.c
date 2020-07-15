@@ -66,6 +66,7 @@
 #include "tunnel.h"
 #include "util.h"
 #include "uuid.h"
+#include "ofproto/neigh-notifier.h"
 
 COVERAGE_DEFINE(xlate_actions);
 COVERAGE_DEFINE(xlate_actions_oversize);
@@ -3657,6 +3658,8 @@ native_tunnel_output(struct xlate_ctx *ctx, const struct xport *xport,
         } else {
             tnl_send_nd_request(ctx, out_dev, smac, &s_ip6, &d_ip6);
         }
+        if (neigh_notifier_enabled())
+            neigh_probe_request();
         return err;
     }
 

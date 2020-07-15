@@ -428,6 +428,7 @@ enum dpdk_hw_ol_features {
     NETDEV_RX_HW_SCATTER = 1 << 2,
     NETDEV_TX_TSO_OFFLOAD = 1 << 3,
     NETDEV_TX_SCTP_CHECKSUM_OFFLOAD = 1 << 4,
+    NETDEV_RX_TUNNEL_CHECKSUM_OFFLOAD = 1 << 5,
 };
 
 /*
@@ -456,7 +457,6 @@ struct netdev_dpdk {
         /* If true, rte_eth_dev_start() was successfully called */
         bool started;
         bool reset_needed;
-        /* 1 pad byte here. */
         struct eth_addr hwaddr;
         int mtu;
         int socket_id;
@@ -546,6 +546,10 @@ struct netdev_dpdk {
          * otherwise interrupt mode is used. */
         bool requested_lsc_interrupt_mode;
         bool lsc_interrupt_mode;
+
+        uint32_t udpport;
+        uint32_t requested_udpport;
+        struct rte_flow *isolate_flow;
     );
 
     PADDED_MEMBERS(CACHE_LINE_SIZE,
@@ -1004,6 +1008,10 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
         conf.rxmode.offloads |= DEV_RX_OFFLOAD_CHECKSUM;
     }
 
+    if (dev->hw_ol_features & NETDEV_RX_TUNNEL_CHECKSUM_OFFLOAD) {
+        conf.rxmode.offloads |= DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM;
+    }
+
     if (!(dev->hw_ol_features & NETDEV_RX_HW_CRC_STRIP)
         && info.rx_offload_capa & DEV_RX_OFFLOAD_KEEP_CRC) {
         conf.rxmode.offloads |= DEV_RX_OFFLOAD_KEEP_CRC;
@@ -1018,6 +1026,8 @@ dpdk_eth_dev_port_config(struct netdev_dpdk *dev, int n_rxq, int n_txq)
 
     /* Limit configured rss hash functions to only those supported
      * by the eth device. */
+    if (dev->requested_udpport)
+        conf.rx_adv_conf.rss_conf.rss_hf = ETH_RSS_NONFRAG_IPV4_UDP | ETH_RSS_NONFRAG_IPV6_UDP;
     conf.rx_adv_conf.rss_conf.rss_hf &= info.flow_type_rss_offloads;
 
     /* A device may report more queues than it makes available (this has
@@ -1105,6 +1115,133 @@ dpdk_eth_flow_ctrl_setup(struct netdev_dpdk *dev) OVS_REQUIRES(dev->mutex)
     }
 }
 
+static void
+netdev_flow_isolate_rule(dpdk_port_t port_id)
+{
+    struct rte_flow_error error;
+
+    if (rte_flow_isolate(port_id, 1, &error)) {
+        VLOG_FATAL("port %u isolate open error, %s\n", port_id, error.message);
+    }
+}
+
+static void
+netdev_flow_bifurcation(struct netdev_dpdk *dev)
+{
+    uint16_t queue[16];
+    struct rte_flow_error error;
+    struct rte_flow_attr attr;
+    struct rte_flow_item pattern[5];
+    struct rte_flow_action action[2];
+    struct rte_flow_action_rss rss;
+    struct rte_flow *flow = NULL;
+    struct rte_flow_item_eth eth_spec;
+    struct rte_flow_item_eth eth_mask;
+    struct rte_flow_item_ipv4 ip_spec;
+    struct rte_flow_item_ipv4 ip_mask;
+    struct rte_flow_item_udp udp_spec;
+    struct rte_flow_item_udp udp_mask;
+    struct rte_flow_item_vxlan vxlan_spec;
+    struct rte_flow_item_vxlan vxlan_mask;
+    int res;
+    unsigned i;
+
+    if (dev->isolate_flow) {
+       int err = rte_flow_destroy(dev->port_id, dev->isolate_flow, &error);
+       if (err < 0) {
+           VLOG_FATAL("port %u destroy isolate flow fail, %s\n", dev->port_id, error.message);
+       }
+    }
+
+    /*
+     * set the rule attribute.
+     * in this case only ingress packets will be checked.
+     */
+    memset(&attr, 0, sizeof(struct rte_flow_attr));
+    attr.ingress = 1;
+
+    /* init rx queue */
+    unsigned rx_queue = dev->up.n_rxq;
+    memset(queue, 0, sizeof(queue));
+    for (i = 0; i < rx_queue && i < 16; i++) {
+        queue[i] = i;
+    }
+
+    memset(&rss, 0, sizeof(struct rte_flow_action_rss));
+    rss.queue_num = i;
+    rss.queue = queue;
+    rss.level = 1;
+    rss.types = ETH_RSS_IP | ETH_RSS_UDP | ETH_RSS_TCP;
+
+    /*
+     * create the action sequence.
+     * one action only,  move packet to rss queue
+     */
+    memset(action, 0, sizeof(action));
+    action[0].type = RTE_FLOW_ACTION_TYPE_RSS;
+    action[0].conf = &rss;
+    action[1].type = RTE_FLOW_ACTION_TYPE_END;
+
+    /*
+     * setting the first level of the pattern (eth).
+     * we just want to get the ipv4 packet.
+     */
+    memset(pattern, 0, sizeof(pattern));
+    memset(&eth_spec, 0, sizeof(struct rte_flow_item_eth));
+    memset(&eth_mask, 0, sizeof(struct rte_flow_item_eth));
+    eth_spec.type = RTE_BE16(RTE_ETHER_TYPE_IPV4);
+    eth_mask.type = 0xffff;
+    pattern[0].type = RTE_FLOW_ITEM_TYPE_ETH;
+    pattern[0].spec = &eth_spec;
+    pattern[0].mask = &eth_mask;
+
+    /*
+     * setting the second level of the pattern (ip).
+     * we just want to get the udp packet.
+     */
+    memset(&ip_spec, 0, sizeof(struct rte_flow_item_ipv4));
+    memset(&ip_mask, 0, sizeof(struct rte_flow_item_ipv4));
+    pattern[1].type = RTE_FLOW_ITEM_TYPE_IPV4;
+    ip_spec.hdr.next_proto_id = IPPROTO_UDP;
+    ip_mask.hdr.next_proto_id = 0xff;
+    pattern[1].spec = &ip_spec;
+    pattern[1].mask = &ip_mask;
+
+    /*
+     * setting the third level of the pattern (udp).
+     * we just want to get the dst port 4789 packet.
+     */
+    memset(&udp_spec, 0, sizeof(struct rte_flow_item_udp));
+    memset(&udp_mask, 0, sizeof(struct rte_flow_item_udp));
+    pattern[2].type = RTE_FLOW_ITEM_TYPE_UDP;
+    udp_spec.hdr.dst_port = RTE_BE16(dev->requested_udpport);
+    udp_mask.hdr.dst_port = 0xffff;
+    pattern[2].spec = &udp_spec;
+    pattern[2].mask = &udp_mask;
+
+    memset(&vxlan_spec, 0, sizeof(struct rte_flow_item_vxlan));
+    memset(&vxlan_mask, 0, sizeof(struct rte_flow_item_vxlan));
+    pattern[3].type = RTE_FLOW_ITEM_TYPE_VXLAN;
+    pattern[3].spec = &vxlan_spec;
+    pattern[3].mask = &vxlan_mask;
+
+    /* the final level must be always type end */
+    pattern[4].type = RTE_FLOW_ITEM_TYPE_END;
+
+    memset(&error, 0, sizeof(error));
+    res = rte_flow_validate(dev->port_id, &attr, pattern, action, &error);
+    if (!res)
+        flow = rte_flow_create(dev->port_id, &attr, pattern, action, &error);
+
+    if (flow == NULL) {
+        VLOG_FATAL("port %u create flow bifurcation error, %s\n", dev->port_id, error.message);
+    }
+
+    dev->isolate_flow = flow;
+    dev->udpport = dev->requested_udpport;
+    VLOG_INFO("DPDK Port %s set to bifurcation mode with udpport %d\n", netdev_get_name(&dev->up), dev->udpport);
+}
+
 static int
 dpdk_eth_dev_init(struct netdev_dpdk *dev)
     OVS_REQUIRES(dev->mutex)
@@ -1118,6 +1255,7 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
     uint32_t rx_chksm_offload_capa = DEV_RX_OFFLOAD_UDP_CKSUM |
                                      DEV_RX_OFFLOAD_TCP_CKSUM |
                                      DEV_RX_OFFLOAD_IPV4_CKSUM;
+    uint32_t rx_tunnel_chksm_offload_capa = DEV_RX_OFFLOAD_OUTER_IPV4_CKSUM;
 
     rte_eth_dev_info_get(dev->port_id, &info);
 
@@ -1136,6 +1274,16 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
     } else {
         dev->hw_ol_features |= NETDEV_RX_CHECKSUM_OFFLOAD;
     }
+
+    if ((info.rx_offload_capa & rx_tunnel_chksm_offload_capa) !=
+            rx_tunnel_chksm_offload_capa) {
+        VLOG_WARN("Rx Tunnel checksum offload is not supported on port "
+                  DPDK_PORT_ID_FMT, dev->port_id);
+        dev->hw_ol_features &= ~NETDEV_RX_TUNNEL_CHECKSUM_OFFLOAD;
+    } else {
+        dev->hw_ol_features |= NETDEV_RX_TUNNEL_CHECKSUM_OFFLOAD;
+    }
+
 
     if (info.rx_offload_capa & DEV_RX_OFFLOAD_SCATTER) {
         dev->hw_ol_features |= NETDEV_RX_HW_SCATTER;
@@ -1165,6 +1313,10 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
     n_rxq = MIN(info.max_rx_queues, dev->up.n_rxq);
     n_txq = MIN(info.max_tx_queues, dev->up.n_txq);
 
+    if (dev->requested_udpport) {
+        netdev_flow_isolate_rule(dev->port_id);
+    }
+
     diag = dpdk_eth_dev_port_config(dev, n_rxq, n_txq);
     if (diag) {
         VLOG_ERR("Interface %s(rxq:%d txq:%d lsc interrupt mode:%s) "
@@ -1175,6 +1327,10 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
         return -diag;
     }
 
+    if (dev->requested_udpport) {
+        netdev_flow_bifurcation(dev);
+    }
+
     diag = rte_eth_dev_start(dev->port_id);
     if (diag) {
         VLOG_ERR("Interface %s start error: %s", dev->up.name,
@@ -1183,8 +1339,10 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev)
     }
     dev->started = true;
 
-    rte_eth_promiscuous_enable(dev->port_id);
-    rte_eth_allmulticast_enable(dev->port_id);
+    if (!dev->requested_udpport) {
+        rte_eth_promiscuous_enable(dev->port_id);
+        rte_eth_allmulticast_enable(dev->port_id);
+    }
 
     memset(&eth_addr, 0x0, sizeof(eth_addr));
     rte_eth_macaddr_get(dev->port_id, &eth_addr);
@@ -1838,6 +1996,12 @@ netdev_dpdk_process_devargs(struct netdev_dpdk *dev,
 {
     dpdk_port_t new_port_id;
 
+    char *udpport = strstr(devargs, ",udpport=");
+    if (udpport) {
+        /* hide udpport= string, let the later netdev_dpdk_get_port_by_mac work */
+        *udpport = '\0';
+    }
+
     if (strncmp(devargs, "class=eth,mac=", 14) == 0) {
         new_port_id = netdev_dpdk_get_port_by_mac(&devargs[14]);
     } else {
@@ -1857,6 +2021,17 @@ netdev_dpdk_process_devargs(struct netdev_dpdk *dev,
                     new_port_id = DPDK_ETH_PORT_ID_INVALID;
                 }
             }
+        }
+    }
+
+    if (udpport) {
+        /* recover the ",udpport=" string
+         * the real processing is in dpdk_eth_dev_init
+         */
+        *udpport = ',';
+        long int port = (uint16_t)strtol(udpport + sizeof(",udpport=") - 1, NULL, 10);
+        if (errno != ERANGE && errno != EINVAL) {
+            dev->requested_udpport = port;
         }
     }
 
@@ -1972,7 +2147,8 @@ netdev_dpdk_set_config(struct netdev *netdev, const struct smap *args,
                                                                   errp);
             if (!rte_eth_dev_is_valid_port(new_port_id)) {
                 err = EINVAL;
-            } else if (new_port_id == dev->port_id) {
+            } else if (new_port_id == dev->port_id && \
+                    dev->requested_udpport == dev->udpport) {
                 /* Already configured, do not reconfigure again */
                 err = 0;
             } else {
@@ -5077,7 +5253,8 @@ netdev_dpdk_reconfigure(struct netdev *netdev)
         && dev->rxq_size == dev->requested_rxq_size
         && dev->txq_size == dev->requested_txq_size
         && dev->socket_id == dev->requested_socket_id
-        && dev->started && !dev->reset_needed) {
+        && dev->started && !dev->reset_needed
+        && dev->requested_udpport == dev->udpport) {
         /* Reconfiguration is unnecessary */
 
         goto out;
@@ -5513,4 +5690,10 @@ netdev_dpdk_register(void)
     netdev_register_provider(&dpdk_ring_class);
     netdev_register_provider(&dpdk_vhost_class);
     netdev_register_provider(&dpdk_vhost_client_class);
+}
+
+int netdev_dpdk_vhost_txq_map_get(const struct netdev *netdev, int tx_qid)
+{
+    const struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+    return dev->tx_q[tx_qid].map;
 }

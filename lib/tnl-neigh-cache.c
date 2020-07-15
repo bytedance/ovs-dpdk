@@ -340,3 +340,20 @@ tnl_neigh_cache_init(void)
     unixctl_command_register("tnl/neigh/set", "BRIDGE IP MAC", 3, 3, tnl_neigh_cache_add, NULL);
     unixctl_command_register("tnl/neigh/flush", "", 0, 0, tnl_neigh_cache_flush, NULL);
 }
+
+void tnl_neigh_set(const char br_name[IFNAMSIZ], const struct in6_addr *ip, \
+                    const struct eth_addr mac)
+{
+    tnl_neigh_set__(br_name, ip, mac);
+}
+
+void tnl_neigh_expire(const char br_name[IFNAMSIZ], const struct in6_addr *ip)
+{
+    struct tnl_neigh_entry *neigh;
+    neigh = tnl_neigh_lookup__(br_name, ip);
+    if (neigh) {
+        ovs_mutex_lock(&mutex);
+        tnl_neigh_delete(neigh);
+        ovs_mutex_unlock(&mutex);
+    }
+}

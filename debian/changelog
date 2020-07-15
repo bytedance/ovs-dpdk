@@ -1,3 +1,16 @@
+openvswitch (2.13.90-3) unstable; urgency=low
+
+  * Support multiple Tx virtio queue per PMD
+  * BugFixes
+
+ -- HePeng <hepeng.0320@bytedance.com>  Fri, 10 Jul 2020 18:23:39 +0800
+
+openvswitch (2.13.90-2) unstable; urgency=low
+
+  * Support bifurcation mode for cx5 NICs
+
+ -- HePeng <hepeng.0320@bytedance.com>  Sun, 28 Jun 2020 14:43:15 +0800
+
 openvswitch (2.13.90-1) unstable; urgency=low
 
    * New upstream version

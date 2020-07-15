@@ -59,6 +59,9 @@ netdev_dpdk_rte_flow_query(struct netdev *netdev,
 int
 netdev_dpdk_get_port_id(const struct netdev *netdev);
 
+int
+netdev_dpdk_vhost_txq_map_get(const struct netdev *netdev, int tx_qid);
+
 #else
 
 static inline void

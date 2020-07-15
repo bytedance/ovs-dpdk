@@ -38,5 +38,7 @@ int tnl_neigh_lookup(const char dev_name[], const struct in6_addr *dst,
 void tnl_neigh_cache_init(void);
 void tnl_neigh_cache_run(void);
 void tnl_neigh_flush(const char dev_name[]);
-
+void tnl_neigh_set(const char dev_name[], const struct in6_addr *dst,
+                    const struct eth_addr mac);
+void tnl_neigh_expire(const char br_name[IFNAMSIZ], const struct in6_addr *ip);
 #endif
