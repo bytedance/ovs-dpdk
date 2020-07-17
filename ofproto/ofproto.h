@@ -563,6 +563,10 @@ enum ofputil_table_miss ofproto_table_get_miss_config(const struct ofproto *,
 
 void
 ofproto_remove_controllers(struct ofproto *p, struct shash *controllers);
+
+void ofproto_ref(struct ofproto *p);
+void ofproto_unref(struct ofproto *p);
+bool ofproto_try_ref(struct ofproto *p);
 #ifdef  __cplusplus
 }
 #endif

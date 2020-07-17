@@ -474,6 +474,24 @@ ofproto_bump_tables_version(struct ofproto *ofproto)
                                                ofproto->tables_version);
 }
 
+void
+ofproto_ref(struct ofproto *ofproto)
+{
+    ovs_refcount_ref(&ofproto->refcount);
+}
+
+bool
+ofproto_try_ref(struct ofproto *ofproto)
+{
+    return ovs_refcount_try_ref_rcu(&ofproto->refcount);
+}
+
+void
+ofproto_unref(struct ofproto *ofproto)
+{
+    ovs_refcount_unref(&ofproto->refcount);
+}
+
 int
 ofproto_create(const char *datapath_name, const char *datapath_type,
                struct ofproto **ofprotop)
@@ -545,6 +563,7 @@ ofproto_create(const char *datapath_name, const char *datapath_type,
 
     ovs_mutex_init(&ofproto->vl_mff_map.mutex);
     cmap_init(&ofproto->vl_mff_map.cmap);
+    ovs_refcount_init(&ofproto->refcount);
 
     error = ofproto->ofproto_class->construct(ofproto);
     if (error) {
@@ -1695,28 +1714,24 @@ ofproto_destroy__(struct ofproto *ofproto)
     ofproto->ofproto_class->dealloc(ofproto);
 }
 
+/* destroying a rule has a very long calling chains, and may have
+ * to wait multiple grace periods:
+ *
+ * for example:
+ * remove_rules_postponed -> remove_rule_rcu -> ofproto_rule_unref
+ * -> ovsrcu_postpone(rule_destroy_cb, rule)
+ *
+ * So we have to check if the ofproto refcount reaches to 1 for sure
+ * all the rules have been destoryed.
+ */
 static void
-ofproto_destroy_defer__3(struct ofproto *ofproto)
+ofproto_destroy_defer__(struct ofproto *ofproto)
     OVS_EXCLUDED(ofproto_mutex)
 {
-    ovsrcu_postpone(ofproto_destroy__, ofproto);
-}
-
-static void
-ofproto_destroy_defer__2(struct ofproto *ofproto)
-    OVS_EXCLUDED(ofproto_mutex)
-{
-    ovsrcu_postpone(ofproto_destroy_defer__3, ofproto);
-}
-
-/* Destroying rules is doubly deferred, must have 'ofproto' around for them.
- * - 1st we defer the removal of the rules from the classifier
- * - 2nd we defer the actual destruction of the rules. */
-static void
-ofproto_destroy_defer__1(struct ofproto *ofproto)
-    OVS_EXCLUDED(ofproto_mutex)
-{
-    ovsrcu_postpone(ofproto_destroy_defer__2, ofproto);
+    if (ovs_refcount_read(&ofproto->refcount) != 1) {
+        ovsrcu_postpone(ofproto_destroy_defer__, ofproto);
+    } else
+        ovsrcu_postpone(ofproto_destroy__, ofproto);
 }
 
 void
@@ -1751,7 +1766,7 @@ ofproto_destroy(struct ofproto *p, bool del)
     ovs_mutex_unlock(&ofproto_mutex);
 
     /* Destroying rules is deferred, must have 'ofproto' around for them. */
-    ovsrcu_postpone(ofproto_destroy_defer__1, p);
+    ovsrcu_postpone(ofproto_destroy_defer__, p);
 }
 
 /* Destroys the datapath with the respective 'name' and 'type'.  With the Linux
@@ -2940,6 +2955,7 @@ ofproto_rule_destroy__(struct rule *rule)
     cls_rule_destroy(CONST_CAST(struct cls_rule *, &rule->cr));
     rule_actions_destroy(rule_get_actions(rule));
     ovs_mutex_destroy(&rule->mutex);
+    ofproto_unref(rule->ofproto);
     rule->ofproto->ofproto_class->rule_dealloc(rule);
 }
 
@@ -5271,6 +5287,7 @@ ofproto_rule_create(struct ofproto *ofproto, struct cls_rule *cr,
 
     /* Initialize base state. */
     *CONST_CAST(struct ofproto **, &rule->ofproto) = ofproto;
+    ofproto_ref(ofproto);
     cls_rule_move(CONST_CAST(struct cls_rule *, &rule->cr), cr);
     ovs_refcount_init(&rule->ref_count);
 

@@ -209,6 +209,7 @@ xlate_cache_clear_entry(struct xc_entry *entry)
 {
     switch (entry->type) {
     case XC_TABLE:
+        ofproto_unref(&(entry->table.ofproto->up));
         break;
     case XC_RULE:
         ofproto_rule_unref(&entry->rule->up);

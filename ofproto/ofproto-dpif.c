@@ -4374,11 +4374,12 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
             }
             if (xcache) {
                 struct xc_entry *entry;
-
-                entry = xlate_cache_add_entry(xcache, XC_TABLE);
-                entry->table.ofproto = ofproto;
-                entry->table.id = *table_id;
-                entry->table.match = true;
+                if (ofproto_try_ref(&ofproto->up)) {
+                    entry = xlate_cache_add_entry(xcache, XC_TABLE);
+                    entry->table.ofproto = ofproto;
+                    entry->table.id = *table_id;
+                    entry->table.match = true;
+                }
             }
             return rule;
         }
@@ -4410,11 +4411,12 @@ rule_dpif_lookup_from_table(struct ofproto_dpif *ofproto,
         }
         if (xcache) {
             struct xc_entry *entry;
-
-            entry = xlate_cache_add_entry(xcache, XC_TABLE);
-            entry->table.ofproto = ofproto;
-            entry->table.id = next_id;
-            entry->table.match = (rule != NULL);
+            if (ofproto_try_ref(&ofproto->up)) {
+                entry = xlate_cache_add_entry(xcache, XC_TABLE);
+                entry->table.ofproto = ofproto;
+                entry->table.id = next_id;
+                entry->table.match = (rule != NULL);
+            }
         }
         if (rule) {
             goto out;   /* Match. */
