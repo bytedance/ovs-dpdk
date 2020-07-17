@@ -81,6 +81,14 @@ enum dp_packet_offload_mask {
     DEF_OL_FLAG(DP_PACKET_OL_TX_UDP_CKSUM, PKT_TX_UDP_CKSUM, 0x400),
     /* Offload SCTP checksum. */
     DEF_OL_FLAG(DP_PACKET_OL_TX_SCTP_CKSUM, PKT_TX_SCTP_CKSUM, 0x800),
+    /* Offloaded packet outer header is IPv4. */
+    DEF_OL_FLAG(DP_PACKET_OL_TX_OUTER_IPV6, PKT_TX_OUTER_IPV6, 0x1000),
+    /* Offloaded packet outer header is IPv4. */
+    DEF_OL_FLAG(DP_PACKET_OL_TX_OUTER_IPV4, PKT_TX_OUTER_IPV4, 0x2000),
+    /* Offloaded packet is vxlan. */
+    DEF_OL_FLAG(DP_PACKET_OL_TX_TUNNEL_VXLAN, PKT_TX_TUNNEL_VXLAN, 0x4000),
+    /* Offload outer IP CKSUM */
+    DEF_OL_FLAG(DP_PACKET_OL_TX_OUTER_IP_CKSUM, PKT_TX_OUTER_IP_CKSUM, 0x8000),
     /* Adding new field requires adding to DP_PACKET_OL_SUPPORTED_MASK. */
 };
 
@@ -95,7 +103,11 @@ enum dp_packet_offload_mask {
                                      DP_PACKET_OL_TX_IPV6          | \
                                      DP_PACKET_OL_TX_TCP_CKSUM     | \
                                      DP_PACKET_OL_TX_UDP_CKSUM     | \
-                                     DP_PACKET_OL_TX_SCTP_CKSUM)
+                                     DP_PACKET_OL_TX_SCTP_CKSUM    | \
+                                     DP_PACKET_OL_TX_OUTER_IPV6    | \
+                                     DP_PACKET_OL_TX_OUTER_IPV4    | \
+                                     DP_PACKET_OL_TX_TUNNEL_VXLAN  | \
+                                     DP_PACKET_OL_TX_OUTER_IP_CKSUM)
 
 #define DP_PACKET_OL_TX_L4_MASK (DP_PACKET_OL_TX_TCP_CKSUM | \
                                  DP_PACKET_OL_TX_UDP_CKSUM | \

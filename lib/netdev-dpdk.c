@@ -2790,13 +2790,6 @@ dpdk_copy_dp_packet_to_mbuf(struct rte_mempool *mp, struct dp_packet *pkt_orig)
     memcpy(&pkt_dest->l2_pad_size, &pkt_orig->l2_pad_size,
            sizeof(struct dp_packet) - offsetof(struct dp_packet, l2_pad_size));
 
-    if (mbuf_dest->ol_flags & PKT_TX_L4_MASK) {
-        mbuf_dest->l2_len = (char *)dp_packet_l3(pkt_dest)
-                                - (char *)dp_packet_eth(pkt_dest);
-        mbuf_dest->l3_len = (char *)dp_packet_l4(pkt_dest)
-                                - (char *) dp_packet_l3(pkt_dest);
-    }
-
     return pkt_dest;
 }
 
@@ -2855,6 +2848,9 @@ dpdk_do_tx_copy(struct netdev *netdev, int qid, struct dp_packet_batch *batch)
         if (dev->type == DPDK_DEV_VHOST) {
             __netdev_dpdk_vhost_send(netdev, qid, pkts, txcnt);
         } else {
+            if (userspace_tso_enabled()) {
+                txcnt = netdev_dpdk_prep_hwol_batch(dev, (struct rte_mbuf **)pkts, txcnt);
+            }
             tx_failure += netdev_dpdk_eth_tx_burst(dev, qid,
                                                    (struct rte_mbuf **)pkts,
                                                    txcnt);

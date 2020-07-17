@@ -528,6 +528,14 @@ ipv4_get_nw_frag(const struct ip_header *nh)
 #define PKT_TX_V6L4_MASK (PKT_TX_IPV6 | PKT_TX_L4_MASK | PKT_TX_TCP_SEG)
 bool dp_packet_hwol_set_len(struct dp_packet *p)
 {
+    /* tunnnel -> vhost direction cksum offload should be
+     * ignored. Otherwise IPv6 TCP cksum is not correct.
+     */
+    if (dp_packet_ip_checksum_valid(p) &&
+        dp_packet_l4_checksum_valid(p)) {
+        return true;
+    }
+
     const struct eth_header *eth = dp_packet_eth(p);
     if (!eth) {
         goto l2_out;
@@ -581,8 +589,6 @@ bool dp_packet_hwol_set_len(struct dp_packet *p)
 
     if (OVS_LIKELY(nw_proto && !(nw_frag & FLOW_NW_FRAG_ANY) && dp_packet_l4(p))) {
         if (nw_proto == IPPROTO_TCP && p->mbuf.ol_flags & PKT_TX_TCP_SEG) {
-            struct tcp_header *th = dp_packet_l4(p);
-            p->mbuf.l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
             p->mbuf.ol_flags |= PKT_TX_TCP_CKSUM;
             if(ip && ip->ip_csum) {
                 ip->ip_csum = 0;
