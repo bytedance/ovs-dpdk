@@ -522,6 +522,15 @@ ipv4_get_nw_frag(const struct ip_header *nh)
 
     return nw_frag;
 }
+#include <rte_ip.h>
+static uint16_t
+get_psd_sum(void *l3_hdr, uint64_t ol_flags)
+{
+    if (ol_flags & PKT_TX_IPV4)
+        return rte_ipv4_phdr_cksum(l3_hdr, ol_flags);
+    else /* assume ethertype == RTE_ETHER_TYPE_IPV6 */
+        return rte_ipv6_phdr_cksum(l3_hdr, ol_flags);
+}
 
 #include <netinet/ip6.h>
 #define PKT_TX_V4L4_MASK (PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_L4_MASK | PKT_TX_TCP_SEG)
@@ -597,21 +606,15 @@ bool dp_packet_hwol_set_len(struct dp_packet *p)
         }
         if (nw_proto == IPPROTO_TCP) {
             struct tcp_header *th = dp_packet_l4(p);
-            if (p->mbuf.ol_flags & PKT_TX_IPV4)
-                th->tcp_csum = packet_csum_pseudoheader(dp_packet_l3(p));
-            if (p->mbuf.ol_flags & PKT_TX_IPV6)
-                th->tcp_csum = packet_csum_pseudoheader6(dp_packet_l3(p));
             p->mbuf.l4_len = TCP_OFFSET(th->tcp_ctl) * 4;
             p->mbuf.ol_flags |= PKT_TX_TCP_CKSUM;
+            th->tcp_csum = get_psd_sum(dp_packet_l3(p), p->mbuf.ol_flags);
         }
         if (nw_proto == IPPROTO_UDP) {
             struct udp_header *uh = dp_packet_l4(p);
-            if (p->mbuf.ol_flags & PKT_TX_IPV4)
-                uh->udp_csum = packet_csum_pseudoheader(dp_packet_l3(p));
-            if (p->mbuf.ol_flags & PKT_TX_IPV6)
-                uh->udp_csum = packet_csum_pseudoheader6(dp_packet_l3(p));
             p->mbuf.l4_len = sizeof(struct udp_header);
             p->mbuf.ol_flags |= PKT_TX_UDP_CKSUM;
+            uh->udp_csum = get_psd_sum(dp_packet_l3(p), p->mbuf.ol_flags);
         }
     } else {
         p->mbuf.l4_len = 0;
