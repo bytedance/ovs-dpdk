@@ -1,3 +1,16 @@
+openvswitch (2.13.90-5) unstable; urgency=low
+
+  * Support hot upgrade in deb
+
+ -- HePeng <hepeng.0320@bytedance.com>  Wed, 22 Jul 2020 10:16:56 +0800
+
+openvswitch (2.13.90-4) unstable; urgency=low
+
+  * Fix psd csum bugs
+  * Fix mirror bugs
+
+ -- HePeng <hepeng.0320@bytedance.com>  Sat, 18 Jul 2020 09:56:11 +0800
+
 openvswitch (2.13.90-3) unstable; urgency=low
 
   * Support multiple Tx virtio queue per PMD

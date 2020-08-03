@@ -1967,3 +1967,11 @@ dpif_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
     }
     return error;
 }
+
+int
+dpif_ndu_exit(struct dpif *dpif)
+{
+    if (dpif->dpif_class->dpif_ndu_exit)
+        return dpif->dpif_class->dpif_ndu_exit(dpif);
+    return 0;
+}

@@ -33,7 +33,7 @@ load_routes() {
 }
 
 get_hugepage_dir() {
-    dir=`ovs-vsctl get open_vswitch . other_config:dpdk-hugepage-dir`
+    dir=`ovs-vsctl get open_vswitch . other_config:dpdk-hugepage-dir 2>/dev/null`
     ret=`echo $?`
     if [[ $ret -ne 0 ]]; then
         dir=`mount | grep huge | awk '{ print $3 }'`

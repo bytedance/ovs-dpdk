@@ -23,7 +23,7 @@ struct ndu_ctx {
     char *remote;
     struct ovsdb_idl *idl;
     int (*br_remove_services_and_snoop)(void);
-    int (*br_remove_all_bridges)(void);
+    int (*br_remove_vhostuser_ports)(void);
     char *pidfile;
 };
 

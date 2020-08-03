@@ -1646,12 +1646,37 @@ static int ndu_fsm_run_stage1(struct ndu_fsm *fsm)
     return EAGAIN;
 }
 
+static struct dpif *ndu_get_dpif(void)
+{
+    const struct ovsrec_open_vswitch *cfg =
+        ovsrec_open_vswitch_first(ndu_ctx.idl);
+
+    if (cfg->n_bridges) {
+        /* as long as we find any dpif, we can get backer
+         * and then use backer->udpif pointer. All 'netdev'
+         * type shares a same backer
+         */
+        struct ovsrec_bridge *br = cfg->bridges[0];
+        struct ofproto_dpif *dpif = ofproto_dpif_lookup_by_name(br->name);
+        return dpif->backer->dpif;
+    }
+    return NULL;
+}
+
+static void ndu_dpif_release(void)
+{
+    struct dpif *dpif = ndu_get_dpif();
+    if (dpif)
+        dpif_ndu_exit(dpif);
+}
+
 static int ndu_fsm_run_stage2(struct ndu_fsm *fsm)
 {
     switch (fsm->state) {
     case NDU_STATE_DATAPATH_RELEASE:
         ndu_rv_pause_rollback(&fsm->ctx.rv_ctx);
-        ndu_ctx.br_remove_all_bridges();
+        ndu_dpif_release();
+        ndu_ctx.br_remove_vhostuser_ports();
         fsm->state = NDU_STATE_DONE;
         VLOG_INFO("ndu stage2 done");
         break;
@@ -2232,15 +2257,16 @@ int ndu_client_before_stage2(void)
         VLOG_INFO("client stage1: ndu install flows %d\n",
                   client.ndu_flow.flows_recv);
         client.state = NDU_CLIENT_STATE_START_STAGE2;
-        /* return to mainloop, start pmd */
         poll_immediate_wake();
-        break;
+        return EAGAIN;
 
     case NDU_CLIENT_STATE_START_STAGE2:
         ndu_client_rpc_transact_stage2();
         VLOG_INFO("client stage2: start stage 2\n");
         client.state = NDU_CLIENT_STATE_RESTORE_HWOFF;
-    /*fall through */
+        /* return to mainloop, start pmd */
+        poll_immediate_wake();
+        break;
 
     case NDU_CLIENT_STATE_RESTORE_HWOFF:
         err = ndu_hwol_off_rollback(&client.ctx.hwoff_ctx);

@@ -36,6 +36,7 @@ EXTRA_DIST += \
 	debian/openvswitch-dpdk-switch.postrm \
 	debian/openvswitch-dpdk-switch.template \
 	debian/openvswitch-dpdk-switch.links \
+	debian/openvswitch-dpdk-switch.service \
 	debian/openvswitch-test.dirs \
 	debian/openvswitch-test.install \
 	debian/openvswitch-test.manpages \

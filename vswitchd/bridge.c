@@ -361,9 +361,9 @@ static ofp_port_t iface_get_requested_ofp_port(
 static ofp_port_t iface_pick_ofport(const struct ovsrec_interface *);
 static int
 bridge_remove_services_and_snoop(void);
-static int
-bridge_remove_all_bridges(void);
 
+static int
+bridge_remove_vhostuser_ports(void);
 
 static void discover_types(const struct ovsrec_open_vswitch *cfg);
 
@@ -534,8 +534,8 @@ bridge_init(const char *remote)
         .idl = idl,
         .br_remove_services_and_snoop = \
                             bridge_remove_services_and_snoop,
-        .br_remove_all_bridges = \
-                            bridge_remove_all_bridges,
+        .br_remove_vhostuser_ports = \
+                            bridge_remove_vhostuser_ports,
         .pidfile = pidfile,
     };
     ndu_init(&ndu_ctx);
@@ -3241,19 +3241,6 @@ bridge_run__(void)
     }
 }
 
-static int
-bridge_remove_all_bridges(void)
-{
-    /* this will delete all pmd threads, release all
-     * netdevs and free datapath.
-     */
-    struct bridge *br, *next_br;
-    HMAP_FOR_EACH_SAFE (br, next_br, node, &all_bridges) {
-        bridge_destroy(br, true);
-    }
-    return 0;
-}
-
 void
 bridge_run(void)
 {
@@ -3748,6 +3735,23 @@ bridge_collect_wanted_ports(struct bridge *br,
 
         shash_add(wanted_ports, br->name, &br->synth_local_port);
     }
+}
+
+static int
+bridge_remove_vhostuser_ports(void)
+{
+    struct bridge *br, *next_br;
+    HMAP_FOR_EACH_SAFE (br, next_br, node, &all_bridges) {
+        struct port *port, *next;
+        HMAP_FOR_EACH_SAFE (port, next, hmap_node, &br->ports) {
+            if (port->cfg->n_interfaces && \
+                port->cfg->interfaces[0] && \
+                !strncmp(port->cfg->interfaces[0]->type, "dpdkvhost", 9)) {
+                port_destroy(port);
+            }
+        }
+    }
+    return 0;
 }
 
 /* Deletes "struct port"s and "struct iface"s under 'br' which aren't

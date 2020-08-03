@@ -36,3 +36,4 @@
 /ovs-vsctl
 /ovs-vsctl.8
 /ovs-sim
+/ovs-nductl

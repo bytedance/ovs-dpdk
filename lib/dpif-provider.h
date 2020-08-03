@@ -614,6 +614,8 @@ struct dpif_class {
      * zero. */
     int (*meter_del)(struct dpif *, ofproto_meter_id meter_id,
                      struct ofputil_meter_stats *, uint16_t n_bands);
+
+    int (*dpif_ndu_exit)(struct dpif *);
 };
 
 extern const struct dpif_class dpif_netlink_class;

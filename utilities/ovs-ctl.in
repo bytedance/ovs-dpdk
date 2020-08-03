@@ -221,6 +221,52 @@ do_start_forwarding () {
     fi
 }
 
+start_ndu_stage_1() {
+    if ! daemon_is_running ovs-vswitchd; then
+        start_forwarding
+    else
+         MAXFD=65535
+        if [ $(ulimit -n) -lt $MAXFD ]; then
+            ulimit -n $MAXFD
+        fi
+
+        # Start ovs-vswitchd.
+        set ovs-vswitchd unix:"$DB_SOCK"
+        set "$@" -vconsole:emer -vsyslog:err -vfile:info
+        if test X"$MLOCKALL" != Xno; then
+            set "$@" --mlockall
+        fi
+        if test X"$SELF_CONFINEMENT" = Xno; then
+            set "$@" --no-self-confinement
+        fi
+        [ "$OVS_USER" != "" ] && set "$@" --user "$OVS_USER"
+        [ "$OVS_VSWITCHD_OPTIONS" != "" ] &&set "$@" $OVS_VSWITCHD_OPTIONS
+
+        start_daemon "$OVS_VSWITCHD_PRIORITY" "$OVS_VSWITCHD_WRAPPER" "$@" ||
+            return 1
+    fi
+}
+
+start_ndu_stage_2() {
+    ovs-nductl -p $1 -m start2
+}
+
+get_hugepage_dir() {
+    hugedir=`ovs-vsctl get open_vswitch . other_config | grep dpdk-hugepage-dir`
+    if [ -n "$hugedir" ]; then
+        hugedir=`ovs-vsctl get open_vswitch . other_config:dpdk-hugepage-dir`
+    fi
+    hugedir=`mount | grep huge | awk '{ print $3 }'`
+}
+
+rm_hugepages_if_any() {
+    get_hugepage_dir
+    if test X"$hugedir" != X; then
+        echo "Remove hugepages: $hugedir, pid: $1"
+        rm -f $hugedir/$1-*
+    fi
+}
+
 start_forwarding () {
     if test X"$OVS_VSWITCHD" = Xyes; then
         do_start_forwarding || return 1
@@ -520,13 +566,22 @@ do
 done
 case $command in
     start)
-        start_ovsdb || exit 1
-        start_forwarding || exit 1
-        add_managers
+        if test X"${OVS_VSWITCHD_HOT_UPGRADE:-no}" = Xno; then
+            start_ovsdb || exit 1
+            start_forwarding || exit 1
+            add_managers
+        else
+            vswitchd_hotupgrade
+            stop_ovsdb
+            start_ovsdb || exit 1
+            add_managers
+        fi
         ;;
     stop)
-        stop_forwarding
-        stop_ovsdb
+        if test X"${OVS_VSWITCHD_HOT_UPGRADE:-no}" = Xno; then
+            stop_forwarding
+            stop_ovsdb
+        fi
         ;;
     restart)
         restart

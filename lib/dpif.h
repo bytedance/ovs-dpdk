@@ -876,6 +876,7 @@ int dpif_meter_get(const struct dpif *, ofproto_meter_id meter_id,
                    struct ofputil_meter_stats *, uint16_t n_bands);
 int dpif_meter_del(struct dpif *, ofproto_meter_id meter_id,
                    struct ofputil_meter_stats *, uint16_t n_bands);
+int dpif_ndu_exit(struct dpif *dpif);
 
 /* Miscellaneous. */
 

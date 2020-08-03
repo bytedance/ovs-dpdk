@@ -658,6 +658,18 @@ force_reload_kmod () {
         "$datadir/scripts/ovs-check-dead-ifs" || true
 }
 
+save_user_routes() {
+    workdir=`mktemp -d`
+    ovs-appctl ovs/route/show | awk '/^User:/{ print $2,$4,$6 }' > "$workdir"/routes
+    trap 'rm -rf "$workdir"' 0
+}
+
+load_user_routes() {
+    while read -r line; do
+        ovs-appctl ovs/route/add $line
+    done < "$workdir"/routes
+}
+
 ## ------- ##
 ## restart ##
 ## ------- ##
@@ -685,4 +697,24 @@ restart () {
     restore_flows
     flow_restore_complete
     add_managers
+}
+
+vswitchd_hotupgrade() {
+    oldpid=`cat $rundir/ovs-vswitchd.pid`
+    echo "Old pid is $oldpid"
+    if daemon_is_running ovsdb-server && daemon_is_running ovs-vswitchd; then
+        init_restore_scripts
+        if test X"${OVS_VSWITCHD:-yes}" = Xyes; then
+            save_flows_if_required
+            save_user_routes
+        fi
+    fi
+
+    start_ndu_stage_1
+    restore_flows
+    load_user_routes
+
+    newpid=`cat $rundir/ovs-vswitchd.pid`
+    start_ndu_stage_2 $newpid
+    rm_hugepages_if_any $oldpid
 }

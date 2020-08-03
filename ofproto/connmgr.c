@@ -583,6 +583,13 @@ connmgr_remove_controllers(struct connmgr *mgr, struct shash *controllers)
                       mgr->name, ofconn_type_to_string(ofservice->type),
                       target);
             ofservice_destroy(ofservice);
+        } else {
+            if (!strncmp(target, "tcp", 3)) {
+                VLOG_INFO("%s: removed %s controller \"%s\"",
+                      mgr->name, ofconn_type_to_string(ofservice->type),
+                      target);
+                ofservice_destroy(ofservice);
+            }
         }
     }
     ovs_mutex_unlock(&ofproto_mutex);

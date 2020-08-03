@@ -2257,7 +2257,7 @@ netdev_dpdk_vhost_client_set_config(struct netdev *netdev,
     bool reconf_required = smap_get_bool(args, "reconf", true);
 
     ovs_mutex_lock(&dev->mutex);
-    if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+    if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT) && reconf_required) {
         path = smap_get(args, "vhost-server-path");
         if (!nullable_string_is_equal(path, dev->vhost_id)) {
             free(dev->vhost_id);
@@ -2269,8 +2269,7 @@ netdev_dpdk_vhost_client_set_config(struct netdev *netdev,
                 dev->vhost_driver_flags &= ~RTE_VHOST_USER_DEQUEUE_ZERO_COPY;
             }
         }
-        if (reconf_required)
-            netdev_request_reconfigure(netdev);
+        netdev_request_reconfigure(netdev);
     }
 
     max_tx_retries = smap_get_int(args, "tx-retries-max",

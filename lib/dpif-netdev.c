@@ -7467,6 +7467,32 @@ dpif_netdev_ipf_dump_done(struct dpif *dpif OVS_UNUSED, void *ipf_dump_ctx)
 
 }
 
+static int
+dpif_netdev_ndu_exit(struct dpif *dpif)
+{
+    struct dp_netdev *dp = get_dp_netdev(dpif);
+    free(dp->pmd_cmask);
+    dp->pmd_cmask = nullable_xstrdup("0x0");
+
+    struct dp_netdev_port *port, *port_tmp;
+    struct hmapx del_ports = HMAPX_INITIALIZER(&del_ports);
+    HMAP_FOR_EACH_SAFE (port, port_tmp, node, &dp->ports) {
+        if (!strncmp(netdev_get_type(port->netdev), "dpdk", 4)) {
+            hmap_remove(&dp->ports, &port->node);
+            seq_change(dp->port_seq);
+            hmapx_add(&del_ports, port);
+        }
+    }
+    reconfigure_datapath(dp);
+    struct hmapx_node *node;
+    HMAPX_FOR_EACH (node, &del_ports) {
+        port = (struct dp_netdev_port *)node->data;
+        port_destroy(port);
+    }
+    hmapx_destroy(&del_ports);
+    return 0;
+}
+
 const struct dpif_class dpif_netdev_class = {
     "netdev",
     true,                       /* cleanup_required */
@@ -7539,6 +7565,7 @@ const struct dpif_class dpif_netdev_class = {
     dpif_netdev_meter_set,
     dpif_netdev_meter_get,
     dpif_netdev_meter_del,
+    dpif_netdev_ndu_exit,
 };
 
 static void
