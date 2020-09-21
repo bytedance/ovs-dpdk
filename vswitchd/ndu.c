@@ -449,13 +449,34 @@ static int ndu_flow_trans_run(struct ndu_flow_trans *trans)
             if (nl_attr_type(a) == OVS_KEY_ATTR_RECIRC_ID
                     && nl_attr_get_u32(a) != 0) {
                 cont = true;
+                break;
             }
         }
+
+        if (cont)
+            continue;
+
         NL_ATTR_FOR_EACH (a, left, f->actions, f->actions_len) {
             if (nl_attr_type(a) == OVS_ACTION_ATTR_RECIRC) {
                 cont = true;
+                break;
+            }
+            if (nl_attr_type(a) == OVS_ACTION_ATTR_CLONE) {
+                const struct nlattr *ca;
+                unsigned int cleft;
+                const struct nlattr *clone_actions = nl_attr_get(a);
+                size_t clone_actions_len = nl_attr_get_size(a);
+                NL_ATTR_FOR_EACH_UNSAFE (ca, cleft, clone_actions, clone_actions_len) {
+                    if (nl_attr_type(ca) == OVS_ACTION_ATTR_RECIRC) {
+                        cont = true;
+                        break;
+                    }
+                }
+                if (cont)
+                    break;
             }
         }
+
         if (cont)
             continue;
 
@@ -482,6 +503,8 @@ static void ndu_flow_trans_wait(struct ndu_flow_trans *trans)
 {
     if (trans->c)
         stream_send_wait(trans->c);
+    if (!trans->batch.count)
+        poll_immediate_wake();
 }
 
 /* ndu fd sync server */
@@ -2026,15 +2049,16 @@ int ndu_connect_and_stage1(long int pid)
         if (!error && reply && state == NDU_STATE_FLOW_SYNC)
             break;
 
-        if (!error && state == NDU_STATE_SYNC)
+        if (!error && state == NDU_STATE_SYNC) {
             state = NDU_STATE_FLOW_SYNC;
+        }
 
         switch (state) {
         case NDU_STATE_SYNC:
-            ndu_flow_server_wait(&client.ndu_flow);
+            ndu_sync_server_wait(&client.ndu_sync);
             break;
         case NDU_STATE_FLOW_SYNC:
-            ndu_sync_server_wait(&client.ndu_sync);
+            ndu_flow_server_wait(&client.ndu_flow);
             break;
         }
         poll_block();
