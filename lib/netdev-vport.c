@@ -47,6 +47,9 @@
 #include "unaligned.h"
 #include "unixctl.h"
 #include "openvswitch/vlog.h"
+#ifdef __linux__
+#include "netdev-linux.h"
+#endif
 
 VLOG_DEFINE_THIS_MODULE(netdev_vport);
 
@@ -1105,17 +1108,20 @@ netdev_vport_get_pt_mode(const struct netdev *netdev)
 
 
 #ifdef __linux__
+#ifndef DPDK_NETDEV
 static int
 netdev_vport_get_ifindex(const struct netdev *netdev_)
 {
     char buf[NETDEV_VPORT_NAME_BUFSIZE];
     const char *name = netdev_vport_get_dpif_port(netdev_, buf, sizeof(buf));
 
-    int ifindex = hash_string(name, 0) % 0xfffffe + 1;
+    int ifindex = linux_get_ifindex(name);
     return ifindex;
 }
-
 #define NETDEV_VPORT_GET_IFINDEX netdev_vport_get_ifindex
+#else
+#define NETDEV_VPORT_GET_IFINDEX NULL
+#endif
 #else /* !__linux__ */
 #define NETDEV_VPORT_GET_IFINDEX NULL
 #endif /* __linux__ */
