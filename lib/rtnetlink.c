@@ -121,6 +121,7 @@ rtnetlink_parse(struct ofpbuf *buf, struct rtnetlink_change *change)
             change->mtu            = (attrs[IFLA_MTU]
                                       ? nl_attr_get_u32(attrs[IFLA_MTU])
                                       : 0);
+            change->ifi_type       = ifinfo->ifi_type;
 
             if (attrs[IFLA_ADDRESS] &&
                 nl_attr_get_size(attrs[IFLA_ADDRESS]) == ETH_ADDR_LEN) {
