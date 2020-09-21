@@ -3922,7 +3922,7 @@ dp_netdev_pmd_flush_output_packets(struct dp_netdev_pmd_thread *pmd,
             for (i = 0; i < netdev_n_txq(p->port->netdev); i ++) {
                 txq = &p->txqs[i];
                 if (!dp_packet_batch_is_empty(&txq->output_pkts) &&
-                        pmd->ctx.now >= txq->flush_time) {
+                        (force || pmd->ctx.now >= txq->flush_time)) {
                     output_cnt += dp_netdev_pmd_flush_output_queue(pmd, p, txq);
                 }
             }
