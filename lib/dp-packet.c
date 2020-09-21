@@ -201,6 +201,10 @@ dp_packet_clone_with_headroom(const struct dp_packet *buffer, size_t headroom)
     if (dp_packet_has_flow_mark(buffer, &mark)) {
         dp_packet_set_flow_mark(new_buffer, mark);
     }
+#ifdef DPDK_NETDEV
+    new_buffer->mbuf.tx_offload = buffer->mbuf.tx_offload;
+    new_buffer->mbuf.packet_type = buffer->mbuf.packet_type;
+#endif
 
     return new_buffer;
 }
