@@ -6612,3 +6612,9 @@ netdev_linux_prepend_vnet_hdr(struct dp_packet *b, int mtu)
         }
     }
 }
+
+void netdev_linux_nsid_set_local(struct netdev *netdev)
+{
+    struct netdev_linux *dev = netdev_linux_cast(netdev);
+    netnsid_set_local(&dev->netnsid);
+}

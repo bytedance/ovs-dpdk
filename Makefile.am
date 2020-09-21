@@ -501,3 +501,4 @@ include windows/automake.mk
 include selinux/automake.mk
 include build-aux/automake.mk
 include scripts/automake.mk
+include tools/automake.mk
