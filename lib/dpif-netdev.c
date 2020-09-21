@@ -2488,13 +2488,7 @@ smc_insert(struct dp_netdev_pmd_thread *pmd,
     struct smc_bucket *bucket = &smc_cache->buckets[key->hash & SMC_MASK];
     uint16_t index;
     uint32_t cmap_index;
-    bool smc_enable_db;
     int i;
-
-    atomic_read_relaxed(&pmd->dp->smc_enable_db, &smc_enable_db);
-    if (!smc_enable_db) {
-        return;
-    }
 
     cmap_index = cmap_find_index(&pmd->flow_table, hash);
     index = (cmap_index >= UINT16_MAX) ? UINT16_MAX : (uint16_t)cmap_index;
@@ -6417,8 +6411,13 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
                                              add_actions->size);
         }
         ovs_mutex_unlock(&pmd->flow_mutex);
-        uint32_t hash = dp_netdev_flow_hash(&netdev_flow->ufid);
-        smc_insert(pmd, key, hash);
+        bool smc_enable_db;
+        atomic_read_relaxed(&pmd->dp->smc_enable_db, &smc_enable_db);
+        if (smc_enable_db) {
+            uint32_t hash = dp_netdev_flow_hash(&netdev_flow->ufid);
+            smc_insert(pmd, key, hash);
+        }
+
         if (emc_probabilistic_insert(pmd, key, netdev_flow)) {
             if (netdev_flow->status == OFFLOAD_NONE) {
                 queue_netdev_flow_put(pmd->dp->dp_flow_offload, \
@@ -6533,8 +6532,12 @@ fast_path_processing(struct dp_netdev_pmd_thread *pmd,
         }
 
         flow = dp_netdev_flow_cast(rules[i]);
-        uint32_t hash =  dp_netdev_flow_hash(&flow->ufid);
-        smc_insert(pmd, keys[i], hash);
+        bool smc_enable_db;
+        atomic_read_relaxed(&pmd->dp->smc_enable_db, &smc_enable_db);
+        if (smc_enable_db) {
+            uint32_t hash =  dp_netdev_flow_hash(&flow->ufid);
+            smc_insert(pmd, keys[i], hash);
+        }
 
         if (emc_probabilistic_insert(pmd, keys[i], flow)) {
             if (flow->status == OFFLOAD_NONE) {
