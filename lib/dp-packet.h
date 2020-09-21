@@ -1074,6 +1074,22 @@ dp_packet_l4_checksum_bad(const struct dp_packet *p)
 
 #ifdef DPDK_NETDEV
 #define VXLAN_HDR_OVERHEAD 50
+static inline bool
+dp_packet_outer_ip_checksum_valid(const struct dp_packet *p)
+{
+    return !((*dp_packet_ol_flags_ptr(p) & PKT_RX_EIP_CKSUM_BAD));
+}
+static inline bool
+dp_packet_outer_l4_checksum_valid(const struct dp_packet *p)
+{
+    return (*dp_packet_ol_flags_ptr(p) & PKT_RX_OUTER_L4_CKSUM_MASK) ==
+            PKT_RX_OUTER_L4_CKSUM_GOOD;
+}
+static inline void
+dp_packet_reset_outer_offload(struct dp_packet *p)
+{
+    *dp_packet_ol_flags_ptr(p) &= ~(PKT_RX_OUTER_L4_CKSUM_MASK | PKT_RX_EIP_CKSUM_BAD);
+}
 bool dp_packet_hwol_set_len(struct dp_packet *p);
 void dp_packet_hwol_set_vxlan4(struct dp_packet *p);
 void dp_packet_hwol_set_vxlan6(struct dp_packet *p);

@@ -391,4 +391,5 @@ bool ofproto_dpif_ct_zone_timeout_policy_get_name(
 
 bool ovs_explicit_drop_action_supported(struct ofproto_dpif *);
 
+const char * lookup_ofproto_name_by_port_name(const char *name);
 #endif /* ofproto-dpif.h */

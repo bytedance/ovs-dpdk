@@ -467,6 +467,13 @@ struct rxq_poll {
     struct hmap_node node;
 };
 
+struct tx_queue {
+    int qid;
+    long long flush_time;
+    struct dp_netdev_rxq *output_pkts_rxqs[NETDEV_MAX_BURST];
+    struct dp_packet_batch output_pkts;
+};
+
 /* Contained by struct dp_netdev_pmd_thread's 'send_port_cache',
  * 'tnl_port_cache' or 'tx_ports'. */
 struct tx_port {
@@ -477,6 +484,7 @@ struct tx_port {
     long long flush_time;
     struct dp_packet_batch output_pkts;
     struct dp_netdev_rxq *output_pkts_rxqs[NETDEV_MAX_BURST];
+    struct tx_queue *txqs;
 };
 
 /* A set of properties for the current processing loop that is not directly
@@ -3809,6 +3817,45 @@ pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd OVS_UNUSED)
 #endif
 
 static int
+dp_netdev_pmd_flush_output_queue(struct dp_netdev_pmd_thread *pmd,
+                                 struct tx_port *p,
+                                 struct tx_queue *txq)
+{
+    int i;
+    int output_cnt;
+    uint32_t tx_flush_interval;
+    struct cycle_timer timer;
+    uint64_t cycles;
+
+    cycle_timer_start(&pmd->perf_stats, &timer);
+
+    output_cnt = dp_packet_batch_size(&txq->output_pkts);
+    ovs_assert(output_cnt > 0);
+
+    netdev_send(p->port->netdev, txq->qid, &txq->output_pkts, false);
+    dp_packet_batch_init(&txq->output_pkts);
+
+    /* Update time of the next flush. */
+    atomic_read_relaxed(&pmd->dp->tx_flush_interval, &tx_flush_interval);
+    txq->flush_time = pmd->ctx.now + tx_flush_interval;
+
+    ovs_assert(pmd->n_output_batches > 0);
+    pmd->n_output_batches--;
+
+    pmd_perf_update_counter(&pmd->perf_stats, PMD_STAT_SENT_PKTS, output_cnt);
+    pmd_perf_update_counter(&pmd->perf_stats, PMD_STAT_SENT_BATCHES, 1);
+    cycles = cycle_timer_stop(&pmd->perf_stats, &timer) / output_cnt;
+    for (i = 0; i < output_cnt; i++) {
+        if (txq->output_pkts_rxqs[i]) {
+            dp_netdev_rxq_add_cycles(txq->output_pkts_rxqs[i],
+                    RXQ_CYCLES_PROC_CURR, cycles);
+        }
+    }
+
+    return output_cnt;
+}
+
+static int
 dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
                                    struct tx_port *p)
 {
@@ -3864,6 +3911,8 @@ dp_netdev_pmd_flush_output_packets(struct dp_netdev_pmd_thread *pmd,
 {
     struct tx_port *p;
     int output_cnt = 0;
+    int i;
+    struct tx_queue *txq;
 
     if (!pmd->n_output_batches) {
         return 0;
@@ -3873,6 +3922,16 @@ dp_netdev_pmd_flush_output_packets(struct dp_netdev_pmd_thread *pmd,
         if (!dp_packet_batch_is_empty(&p->output_pkts)
             && (force || pmd->ctx.now >= p->flush_time)) {
             output_cnt += dp_netdev_pmd_flush_output_on_port(pmd, p);
+        }
+
+        if (p->txqs) {
+            for (i = 0; i < netdev_n_txq(p->port->netdev); i ++) {
+                txq = &p->txqs[i];
+                if (!dp_packet_batch_is_empty(&txq->output_pkts) &&
+                        pmd->ctx.now >= txq->flush_time) {
+                    output_cnt += dp_netdev_pmd_flush_output_queue(pmd, p, txq);
+                }
+            }
         }
     }
     return output_cnt;
@@ -5057,6 +5116,7 @@ pmd_free_cached_ports(struct dp_netdev_pmd_thread *pmd)
     dpif_netdev_xps_revalidate_pmd(pmd, true);
 
     HMAP_FOR_EACH_POP (tx_port_cached, node, &pmd->tnl_port_cache) {
+        free(tx_port_cached->txqs);
         free(tx_port_cached);
     }
     HMAP_FOR_EACH_POP (tx_port_cached, node, &pmd->send_port_cache) {
@@ -5087,6 +5147,15 @@ pmd_load_cached_ports(struct dp_netdev_pmd_thread *pmd)
 
         if (netdev_n_txq(tx_port->port->netdev)) {
             tx_port_cached = xmemdup(tx_port, sizeof *tx_port_cached);
+            if (!strncmp(tx_port->port->type, "dpdkvhost", 9) && \
+                    netdev_n_txq(tx_port->port->netdev) > cmap_count(&pmd->dp->poll_threads)) {
+                tx_port_cached->txqs = xzalloc(netdev_n_txq(tx_port->port->netdev) * sizeof(struct tx_queue));
+                for(int i = 0; i < netdev_n_txq(tx_port->port->netdev); i++) {
+                    struct tx_queue *txq = &tx_port_cached->txqs[i];
+                    dp_packet_batch_init(&txq->output_pkts);
+                    txq->qid = i;
+                }
+            }
             hmap_insert(&pmd->send_port_cache, &tx_port_cached->node,
                         hash_port_no(tx_port_cached->port->port_no));
         }
@@ -6728,6 +6797,94 @@ dp_execute_userspace_action(struct dp_netdev_pmd_thread *pmd,
 }
 
 static void
+dp_netdev_output_on_txqs(struct dp_netdev_pmd_thread *pmd,
+                         struct dp_packet_batch *packets_,
+                         struct tx_port *p)
+{
+    struct dp_packet *packet;
+    struct tx_queue *txq;
+    int qid;
+    DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
+        if (OVS_LIKELY(dp_packet_rss_valid(packet))) {
+            int vqid = dp_packet_get_rss_hash(packet) % netdev_n_txq(p->port->netdev);
+            qid = netdev_dpdk_vhost_txq_map_get(p->port->netdev, vqid);
+            if (qid < 0)
+                qid = vqid;
+        } else {
+            qid = pmd->static_tx_qid;
+        }
+
+        txq = &p->txqs[qid];
+
+#ifdef DPDK_NETDEV
+        if (OVS_UNLIKELY(!dp_packet_batch_is_empty(&txq->output_pkts)
+                    && packets_->packets[0]->source
+                    != txq->output_pkts.packets[0]->source)) {
+            /* XXX: netdev-dpdk assumes that all packets in a single
+             *      output batch has the same source. Flush here to
+             *      avoid memory access issues. */
+            dp_netdev_pmd_flush_output_queue(pmd, p, txq);
+        }
+#endif
+        if (dp_packet_batch_size(&txq->output_pkts) == NETDEV_MAX_BURST) {
+            dp_netdev_pmd_flush_output_queue(pmd, p, txq);
+        }
+
+        if (dp_packet_batch_is_empty(&txq->output_pkts)) {
+            pmd->n_output_batches++;
+        }
+        txq->output_pkts_rxqs[dp_packet_batch_size(&txq->output_pkts)] =
+            pmd->ctx.last_rxq;
+        dp_packet_batch_add(&txq->output_pkts, packet);
+    }
+}
+
+static void
+dp_netdev_output_on_queue(struct dp_netdev_pmd_thread *pmd,
+                          struct dp_packet_batch *packets_,
+                          struct tx_port *p)
+{
+    struct dp_packet *packet;
+#ifdef DPDK_NETDEV
+    if (OVS_UNLIKELY(!dp_packet_batch_is_empty(&p->output_pkts)
+                && packets_->packets[0]->source
+                != p->output_pkts.packets[0]->source)) {
+        /* XXX: netdev-dpdk assumes that all packets in a single
+         *      output batch has the same source. Flush here to
+         *      avoid memory access issues. */
+        dp_netdev_pmd_flush_output_on_port(pmd, p);
+    }
+#endif
+    if (dp_packet_batch_size(&p->output_pkts)
+            + dp_packet_batch_size(packets_) > NETDEV_MAX_BURST) {
+        /* Flush here to avoid overflow. */
+        dp_netdev_pmd_flush_output_on_port(pmd, p);
+    }
+
+    if (dp_packet_batch_is_empty(&p->output_pkts)) {
+        pmd->n_output_batches++;
+    }
+
+    int idx = dp_packet_batch_size(&p->output_pkts);
+    DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
+        p->output_pkts_rxqs[idx++] = pmd->ctx.last_rxq;
+        dp_packet_batch_add(&p->output_pkts, packet);
+    }
+}
+
+static void
+dp_netdev_output_on_port(struct dp_netdev_pmd_thread *pmd,
+                         struct dp_packet_batch *packets_,
+                         struct tx_port *p)
+{
+    if (p->txqs) {
+        dp_netdev_output_on_txqs(pmd, packets_, p);
+    } else {
+        dp_netdev_output_on_queue(pmd, packets_, p);
+    }
+}
+
+static void
 dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
               const struct nlattr *a, bool should_steal)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -6744,7 +6901,6 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_OUTPUT:
         p = pmd_send_port_cache_lookup(pmd, nl_attr_get_odp_port(a));
         if (OVS_LIKELY(p)) {
-            struct dp_packet *packet;
             struct dp_packet_batch out;
 
             if (!should_steal) {
@@ -6753,32 +6909,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                 packets_ = &out;
             }
             dp_packet_batch_apply_cutlen(packets_);
-
-#ifdef DPDK_NETDEV
-            if (OVS_UNLIKELY(!dp_packet_batch_is_empty(&p->output_pkts)
-                             && packets_->packets[0]->source
-                                != p->output_pkts.packets[0]->source)) {
-                /* XXX: netdev-dpdk assumes that all packets in a single
-                 *      output batch has the same source. Flush here to
-                 *      avoid memory access issues. */
-                dp_netdev_pmd_flush_output_on_port(pmd, p);
-            }
-#endif
-            if (dp_packet_batch_size(&p->output_pkts)
-                + dp_packet_batch_size(packets_) > NETDEV_MAX_BURST) {
-                /* Flush here to avoid overflow. */
-                dp_netdev_pmd_flush_output_on_port(pmd, p);
-            }
-
-            if (dp_packet_batch_is_empty(&p->output_pkts)) {
-                pmd->n_output_batches++;
-            }
-
-            DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
-                p->output_pkts_rxqs[dp_packet_batch_size(&p->output_pkts)] =
-                                                             pmd->ctx.last_rxq;
-                dp_packet_batch_add(&p->output_pkts, packet);
-            }
+            dp_netdev_output_on_port(pmd, packets_, p);
             return;
         } else {
             COVERAGE_ADD(datapath_drop_invalid_port,

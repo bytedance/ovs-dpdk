@@ -918,7 +918,7 @@ netdev_pop_header(struct netdev *netdev, struct dp_packet_batch *batch)
             /* Reset the offload flags if present, to avoid wrong
              * interpretation in the further packet processing when
              * recirculated.*/
-            dp_packet_reset_offload(packet);
+            dp_packet_reset_outer_offload(packet);
             pkt_metadata_init_conn(&packet->md);
             dp_packet_batch_refill(batch, packet, i);
         }

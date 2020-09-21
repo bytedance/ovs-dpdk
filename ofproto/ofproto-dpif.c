@@ -6715,3 +6715,13 @@ const struct ofproto_class ofproto_dpif_class = {
     ct_del_zone_timeout_policy,
     get_datapath_cap,
 };
+
+const char *
+lookup_ofproto_name_by_port_name(const char *name)
+{
+    struct ofproto_dpif *ofproto;
+    ofproto = lookup_ofproto_dpif_by_port_name(name);
+    if (!ofproto)
+        return NULL;
+    return ofproto->up.name;
+}

@@ -74,6 +74,7 @@
 #include "vlan-bitmap.h"
 #include "ndu.h"
 #include "openvswitch/util.h"
+#include "ofproto/neigh-notifier.h"
 
 VLOG_DEFINE_THIS_MODULE(bridge);
 
@@ -572,6 +573,7 @@ bridge_exit(bool delete_datapath)
 
     ndu_destroy();
     ovsdb_idl_destroy(idl);
+    neigh_notifier_destroy();
 }
 
 /* Looks at the list of managers in 'ovs_cfg' and extracts their remote IP
@@ -3264,6 +3266,8 @@ bridge_run(void)
 
     if_notifier_run();
 
+    neigh_notifier_run();
+
     if (ovsdb_idl_is_lock_contended(idl)) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
         struct bridge *br, *next_br;
@@ -3295,6 +3299,7 @@ bridge_run(void)
         netdev_set_flow_api_enabled(&cfg->other_config);
         dpdk_init(&cfg->other_config);
         userspace_tso_init(&cfg->other_config);
+        neigh_notifier_init(&cfg->other_config);
     }
 
     /* Initialize the ofproto library.  This only needs to run once, but
@@ -3393,6 +3398,7 @@ bridge_wait(void)
     }
 
     if_notifier_wait();
+    neigh_notifier_wait();
 
     sset_init(&types);
     ofproto_enumerate_types(&types);
