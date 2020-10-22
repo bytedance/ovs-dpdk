@@ -62,6 +62,8 @@ static int pktlen = 64;
 static struct classifier cls;
 static struct classifier neigh_cls;
 static char *corelist;
+static int pktcnt;
+static int timeout;
 
 struct route_data {
     /* Copied from struct rtmsg. */
@@ -593,7 +595,7 @@ static void make_pkts(void) {
 
     free(saddrs);
     free(masks);
-
+    int pkts = 0;
     LIST_FOR_EACH(p, node, &pkt_head) {
         dp_packet_init(&p->pkt, p->len);
         struct in_addr addr = {.s_addr = p->ipv4};
@@ -606,7 +608,39 @@ static void make_pkts(void) {
         construct_ip4_header(&p->pkt, saddr, p->ipv4, IPPROTO_UDP);
         construct_udp_header(&p->pkt, 1234, (random() % 65536));
         dp_packet_set_size(&p->pkt, p->len);
+        pkts ++;
     }
+
+    struct ovs_list duplist = OVS_LIST_INITIALIZER(&duplist);
+    if (pktcnt) {
+        while (pkts < pktcnt) {
+            LIST_FOR_EACH(p, node, &pkt_head) {
+                struct ip_pkt *pkt = xmalloc(sizeof(struct ip_pkt));
+                pkt->ipv4 = p->ipv4;
+                pkt->len = p->len;
+                ovs_list_init(&pkt->node);
+
+                dp_packet_init(&pkt->pkt, p->len);
+                struct in_addr addr = {.s_addr = p->ipv4};
+                struct in6_addr gw;
+                struct eth_addr dmac;
+
+                route_table_lookup4(addr, &gw);
+                neigh_table_lookup4(&gw, &dmac);
+                construct_eth_header(&pkt->pkt, &dmac, &smac, ETH_TYPE_IP);
+                construct_ip4_header(&pkt->pkt, saddr, p->ipv4, IPPROTO_UDP);
+                construct_udp_header(&pkt->pkt, 1234, (random() % 65536));
+                dp_packet_set_size(&pkt->pkt, p->len);
+                ovs_list_push_back(&duplist, &pkt->node);
+                pkts ++;
+                if (pkts == pktcnt)
+                    break;
+            }
+        }
+        ovs_list_push_back_all(&pkt_head, &duplist);
+    }
+
+    VLOG_INFO("consturct %d pkts\n", pkts);
 
     netdev_close(dev);
 }
@@ -655,6 +689,8 @@ static void parse_options(int argc, char *argv[]) {
         {"file", required_argument, NULL, 'f'},
         {"length", required_argument, NULL, 'l'},
         {"core-list", required_argument, NULL, 'c'},
+        {"pkt-cnt", required_argument, NULL, 'n'},
+        {"timeout", required_argument, NULL, 't'},
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
@@ -685,10 +721,16 @@ static void parse_options(int argc, char *argv[]) {
                 exit(-1);
             }
             break;
+        case 'n':
+            str_to_int(optarg, 10, &pktcnt);
+            break;
         case 0:
             break;
         case 'c':
             corelist = xstrdup(optarg);
+            break;
+        case 't':
+            str_to_int(optarg, 10, &timeout);
             break;
         default:
             abort();
@@ -830,7 +872,7 @@ int main(int argc, char *argv[]) {
         route_table_dump();
     }
 
-    struct ovs_numa_dump *sender_cores;
+    struct ovs_numa_dump *sender_cores = NULL;
 
     struct ovs_numa_info_core *core;
     int n_threads = 0;
@@ -845,12 +887,19 @@ int main(int argc, char *argv[]) {
                     break;
                 }
             }
-            ovs_numa_dump_destroy(sender_cores);
         } else {
             t[0] = ovs_thread_create("sender", sender, NULL);
         }
+        if (timeout != 0) {
+            long long now = time_msec();
+            poll_timer_wait_until(now + timeout * 1000);
+            VLOG_INFO("Running for %d sec\n", timeout);
+        }
         poll_block();
     }
+
+    if (sender_cores)
+        ovs_numa_dump_destroy(sender_cores);
 
     return 0;
 }
