@@ -1786,6 +1786,37 @@ static void ndu_handle_stage1_msg(struct jsonrpc_msg *msg,
     }
 }
 
+enum {
+    NDU_CLIENT_STATE_IDLE,
+    NDU_CLIENT_STATE_SYNC_DB,
+    NDU_CLIENT_STATE_PROBE_NETDEV,
+    NDU_CLIENT_STATE_WAIT_NETDEV_DONE,
+    NDU_CLIENT_STATE_WAIT_STAGE2,
+    NDU_CLIENT_STATE_FLOW_INSTALL,
+    NDU_CLIENT_STATE_START_STAGE2,
+    NDU_CLIENT_STATE_RESTORE_HWOFF,
+    NDU_CLIENT_STATE_STAGE2_DONE,
+};
+
+struct ndu_client_restore_state {
+    struct ndu_hwol_off_ctx hwoff_ctx;
+};
+
+struct ndu_client {
+    struct jsonrpc *rpc;
+    unsigned int idl_seqno;
+    struct ovsdb_idl *idl;
+    struct shash probe_netdevs;
+    struct ndu_client_restore_state ctx;
+    struct ndu_data_server ndu_data;
+    struct ndu_flow_server ndu_flow;
+    struct ndu_sync_server ndu_sync;
+    struct ndu_cmd_server ndu_cmd;
+    int state;
+};
+
+static struct ndu_client client;
+
 static int ndu_conn_run(struct ndu_conn *conn)
 {
     int error;
@@ -1816,6 +1847,13 @@ static int ndu_conn_run(struct ndu_conn *conn)
     if (msg) {
         if (msg->type == JSONRPC_REQUEST) {
             conn->request_id = json_clone(msg->id);
+            if (client.state != NDU_CLIENT_STATE_STAGE2_DONE && \
+                    client.state != NDU_CLIENT_STATE_IDLE) {
+                VLOG_ERR("In the process of ndu connect, reject\n");
+                ndu_jsonrpc_error(conn, "fail");
+                goto finish_msg;
+            }
+
             if (!strcmp(msg->method, "stage1")) {
                 conn->method = NDU_STAGE1;
                 ndu_handle_stage1_msg(msg, conn);
@@ -1940,41 +1978,11 @@ void ndu_destroy(void)
 
 int ndu_state(void) { return ndu_fsm.state; }
 
-enum {
-    NDU_CLIENT_STATE_IDLE,
-    NDU_CLIENT_STATE_SYNC_DB,
-    NDU_CLIENT_STATE_PROBE_NETDEV,
-    NDU_CLIENT_STATE_WAIT_NETDEV_DONE,
-    NDU_CLIENT_STATE_WAIT_STAGE2,
-    NDU_CLIENT_STATE_FLOW_INSTALL,
-    NDU_CLIENT_STATE_START_STAGE2,
-    NDU_CLIENT_STATE_RESTORE_HWOFF,
-    NDU_CLIENT_STATE_STAGE2_DONE,
-};
-
-struct ndu_client_restore_state {
-    struct ndu_hwol_off_ctx hwoff_ctx;
-};
-
-struct ndu_client {
-    struct jsonrpc *rpc;
-    unsigned int idl_seqno;
-    struct ovsdb_idl *idl;
-    struct shash probe_netdevs;
-    struct ndu_client_restore_state ctx;
-    struct ndu_data_server ndu_data;
-    struct ndu_flow_server ndu_flow;
-    struct ndu_sync_server ndu_sync;
-    struct ndu_cmd_server ndu_cmd;
-    int state;
-};
-
 struct probe_netdev {
     struct netdev *netdev;
     int ref_cnt;
 };
 
-static struct ndu_client client;
 
 static void ndu_client_init(void)
 {
@@ -2045,9 +2053,13 @@ int ndu_connect_and_stage1(long int pid)
         jsonrpc_close(rpc);
         ndu_flow_server_destroy(&client.ndu_flow);
         client.rpc = NULL;
-        return -1;
+        return error;
     }
     int state = NDU_STATE_SYNC;
+    /* tell ndu_run that we are in ndu client state, will forbid
+     * ndu server to run
+     */
+    client.state = state;
 
     for (;;) {
         if (!reply) {
