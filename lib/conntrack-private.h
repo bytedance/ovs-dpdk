@@ -57,6 +57,8 @@ struct conn_key {
     ovs_be16 dl_type;
     uint16_t zone;
     uint8_t nw_proto;
+    uint8_t orig;
+    struct cmap_node cm_node;
 };
 
 /* This is used for alg expectations; an expectation is a
@@ -83,42 +85,101 @@ struct alg_exp_node {
     bool nat_rpl_dst;
 };
 
-enum OVS_PACKED_ENUM ct_conn_type {
-    CT_CONN_TYPE_DEFAULT,
-    CT_CONN_TYPE_UN_NAT,
+enum ct_alg_ctl_type {
+    CT_ALG_CTL_NONE,
+    CT_ALG_CTL_FTP,
+    CT_ALG_CTL_TFTP,
+    /* SIP is not enabled through Openflow and presently only used as
+     * an example of an alg that allows a wildcard src ip. */
+    CT_ALG_CTL_SIP,
+    CT_ALG_CTL_MAX,
+};
+
+#define CONN_FLAG_NAT_MASK    0xf
+#define CONN_FLAG_CTL_FTP     (CT_ALG_CTL_FTP  << 4)
+#define CONN_FLAG_CTL_TFTP    (CT_ALG_CTL_TFTP << 4)
+#define CONN_FLAG_CTL_SIP     (CT_ALG_CTL_SIP  << 4)
+/* currently only 3 algs supported */
+#define CONN_FLAG_ALG_MASK    0x70
+#define CONN_FLAG_ALG_RELATED 0x80
+#define CONN_FLAG_DYING       0x100 /* indicate if it is removed from timer */
+
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+#define WRITE_ONCE(x, val) ({ ACCESS_ONCE(x) = (val); })
+
+#if HAVE_PTHREAD_SPIN_LOCK == 0
+static inline void conn_lock(const struct ovs_mutex *lock) {
+    ovs_mutex_lock(lock);
+}
+#else
+static inline void conn_lock(const struct ovs_spin *lock) {
+    ovs_spin_lock(lock);
+}
+#endif
+
+#if HAVE_PTHREAD_SPIN_LOCK == 0
+static inline void conn_unlock(const struct ovs_mutex *lock) {
+    ovs_mutex_unlock(lock);
+}
+#else
+static inline void conn_unlock(const struct ovs_spin *lock) {
+    ovs_spin_unlock(lock);
+}
+#endif
+
+#if HAVE_PTHREAD_SPIN_LOCK == 0
+static inline void conn_lock_init(struct ovs_mutex *lock) {
+    ovs_mutex_init_adaptive(lock);
+}
+#else
+static inline void conn_lock_init(struct ovs_spin *lock) {
+    ovs_spin_init(lock);
+}
+#endif
+
+#if HAVE_PTHREAD_SPIN_LOCK == 0
+static inline void conn_lock_destroy(struct ovs_mutex *lock) {
+    ovs_mutex_destroy(lock);
+}
+#else
+static inline void conn_lock_destroy(struct ovs_spin *lock) {
+    (void)lock;
+}
+#endif
+
+struct conn_alg {
+    struct conn_key master_key; /* Only used for orig_tuple support. */
+    int seq_skew;
+    bool seq_skew_dir; /* TCP sequence skew direction due to NATTing of FTP
+                        * control messages; true if reply direction. */
 };
 
 struct conn {
     /* Immutable data. */
     struct conn_key key;
     struct conn_key rev_key;
-    struct conn_key master_key; /* Only used for orig_tuple support. */
-    struct ovs_list exp_node;
-    struct cmap_node cm_node;
-    struct nat_action_info_t *nat_info;
-    char *alg;
-    struct conn *nat_conn; /* The NAT 'conn' context, if there is one. */
-
-    /* Mutable data. */
-    struct ovs_mutex lock; /* Guards all mutable fields. */
-    ovs_u128 label;
-    long long expiration;
-    uint32_t mark;
-    int seq_skew;
+    uint64_t conn_flags;
 
     /* Immutable data. */
     int32_t admit_zone; /* The zone for managing zone limit counts. */
     uint32_t zone_limit_seq; /* Used to disambiguate zone limit counts. */
 
     /* Mutable data. */
-    bool seq_skew_dir; /* TCP sequence skew direction due to NATTing of FTP
-                        * control messages; true if reply direction. */
-    bool cleaned; /* True if cleaned from expiry lists. */
-
-    /* Immutable data. */
-    bool alg_related; /* True if alg data connection. */
-    enum ct_conn_type conn_type;
+#if HAVE_PTHREAD_SPIN_LOCK == 0
+    struct ovs_mutex lock; /* Guards all mutable fields. */
+#else
+    struct ovs_spin  lock; /* Guards all mutable fields. */
+#endif
+    ovs_u128 label;
+    long long expiration;
+    struct conn_alg *alg;
+    uint32_t mark;
 };
+
+static inline struct conn * conn_from_connkey(struct conn_key *connkey) {
+    return connkey->orig ? CONTAINER_OF(connkey, struct conn, key) : \
+                           CONTAINER_OF(connkey, struct conn, rev_key);
+}
 
 enum ct_update_res {
     CT_UPDATE_INVALID,
@@ -161,7 +222,6 @@ enum ct_timeout {
 struct conntrack {
     struct ovs_mutex ct_lock; /* Protects 2 following fields. */
     struct cmap conns OVS_GUARDED;
-    struct ovs_list exp_lists[N_CT_TM] OVS_GUARDED;
     struct hmap zone_limits OVS_GUARDED;
     uint32_t hash_basis; /* Salt for hashing a connection key. */
     pthread_t clean_thread; /* Periodically cleans up connection tracker. */
@@ -204,6 +264,7 @@ struct ct_l4_proto {
                                       long long now);
     void (*conn_get_protoinfo)(const struct conn *,
                                struct ct_dpif_protoinfo *);
+    int (*conn_size)(void);
 };
 
 extern long long ct_timeout_val[];
@@ -211,32 +272,31 @@ extern long long ct_timeout_val[];
 
 /* ct_lock must be held. */
 static inline void
-conn_init_expiration(struct conntrack *ct, struct conn *conn,
-                     enum ct_timeout tm, long long now)
+conn_init_expiration(struct conntrack *ct OVS_UNUSED, struct conn *conn, enum ct_timeout tm, long long now)
 {
     conn->expiration = now + ct_timeout_val[tm];
-    ovs_list_push_back(&ct->exp_lists[tm], &conn->exp_node);
+}
+
+static inline bool
+conn_is_dying(struct conn *conn)
+{
+    return (conn->conn_flags & CONN_FLAG_DYING);
+}
+
+static inline bool
+conn_try_kill(struct conn *conn)
+{
+    uint64_t old_flag;
+    atomic_or_explicit(&conn->conn_flags, CONN_FLAG_DYING, &old_flag, memory_order_acquire);
+    return !(old_flag & CONN_FLAG_DYING);
 }
 
 /* The conn entry lock must be held on entry and exit. */
 static inline void
-conn_update_expiration(struct conntrack *ct, struct conn *conn,
-                       enum ct_timeout tm, long long now)
-    OVS_NO_THREAD_SAFETY_ANALYSIS
+conn_update_expiration(struct conntrack *ct OVS_UNUSED, struct conn *conn, enum ct_timeout tm, long long now)
 {
-    ovs_mutex_unlock(&conn->lock);
-
-    ovs_mutex_lock(&ct->ct_lock);
-    ovs_mutex_lock(&conn->lock);
-    if (!conn->cleaned) {
-        conn->expiration = now + ct_timeout_val[tm];
-        ovs_list_remove(&conn->exp_node);
-        ovs_list_push_back(&ct->exp_lists[tm], &conn->exp_node);
-    }
-    ovs_mutex_unlock(&conn->lock);
-    ovs_mutex_unlock(&ct->ct_lock);
-
-    ovs_mutex_lock(&conn->lock);
+    if (!conn_is_dying(conn))
+        WRITE_ONCE(conn->expiration, now + ct_timeout_val[tm]);
 }
 
 static inline uint32_t
@@ -250,5 +310,7 @@ tcp_payload_length(struct dp_packet *pkt)
         return 0;
     }
 }
+
+void *conn_get(size_t size);
 
 #endif /* conntrack-private.h */

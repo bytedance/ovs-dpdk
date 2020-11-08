@@ -442,7 +442,7 @@ tcp_new_conn(struct conntrack *ct, struct dp_packet *pkt, long long now)
     struct tcp_peer *src, *dst;
     uint16_t tcp_flags = TCP_FLAGS(tcp->tcp_ctl);
 
-    newconn = xzalloc(sizeof *newconn);
+    newconn = conn_get(sizeof(struct conn_tcp));
 
     src = &newconn->peer[0];
     dst = &newconn->peer[1];
@@ -509,9 +509,16 @@ tcp_conn_get_protoinfo(const struct conn *conn_,
     protoinfo->tcp.flags_reply = tcp_peer_to_protoinfo_flags(&conn->peer[1]);
 }
 
+static int
+tcp_conn_size(void)
+{
+    return sizeof(struct conn_tcp);
+}
+
 struct ct_l4_proto ct_proto_tcp = {
     .new_conn = tcp_new_conn,
     .valid_new = tcp_valid_new,
     .conn_update = tcp_conn_update,
     .conn_get_protoinfo = tcp_conn_get_protoinfo,
+    .conn_size = tcp_conn_size,
 };
