@@ -73,7 +73,7 @@ other_new_conn(struct conntrack *ct, struct dp_packet *pkt OVS_UNUSED,
 {
     struct conn_other *conn;
 
-    conn = xzalloc(sizeof *conn);
+    conn = conn_get(sizeof(*conn));
     conn->state = OTHERS_FIRST;
 
     conn_init_expiration(ct, &conn->up, other_timeouts[conn->state], now);
@@ -81,8 +81,15 @@ other_new_conn(struct conntrack *ct, struct dp_packet *pkt OVS_UNUSED,
     return &conn->up;
 }
 
+static int
+other_conn_size(void)
+{
+    return sizeof(struct conn_other);
+}
+
 struct ct_l4_proto ct_proto_other = {
     .new_conn = other_new_conn,
     .valid_new = other_valid_new,
     .conn_update = other_conn_update,
+    .conn_size = other_conn_size,
 };

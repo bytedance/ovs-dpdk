@@ -81,21 +81,29 @@ static struct conn *
 icmp_new_conn(struct conntrack *ct, struct dp_packet *pkt OVS_UNUSED,
               long long now)
 {
-    struct conn_icmp *conn = xzalloc(sizeof *conn);
+    struct conn_icmp *conn = conn_get(sizeof(*conn));
     conn->state = ICMPS_FIRST;
     conn_init_expiration(ct, &conn->up, icmp_timeouts[conn->state], now);
 
     return &conn->up;
 }
 
+static int
+icmp_conn_size(void)
+{
+    return sizeof(struct conn_icmp);
+}
+
 struct ct_l4_proto ct_proto_icmp4 = {
     .new_conn = icmp_new_conn,
     .valid_new = icmp4_valid_new,
     .conn_update = icmp_conn_update,
+    .conn_size = icmp_conn_size,
 };
 
 struct ct_l4_proto ct_proto_icmp6 = {
     .new_conn = icmp_new_conn,
     .valid_new = icmp6_valid_new,
     .conn_update = icmp_conn_update,
+    .conn_size = icmp_conn_size,
 };
