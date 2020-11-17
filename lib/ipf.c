@@ -1154,6 +1154,7 @@ ipf_post_execute_reass_pkts(struct ipf *ipf,
          * NETDEV_MAX_BURST. */
         DP_PACKET_BATCH_REFILL_FOR_EACH (pb_idx, pb_cnt, pkt, pb) {
             if (rp && pkt == rp->list->reass_execute_ctx) {
+                const struct ipf_frag *frag_0 = &rp->list->frag_list[0];
                 for (int i = 0; i <= rp->list->last_inuse_idx; i++) {
                     rp->list->frag_list[i].pkt->md.ct_label = pkt->md.ct_label;
                     rp->list->frag_list[i].pkt->md.ct_mark = pkt->md.ct_mark;
@@ -1168,9 +1169,10 @@ ipf_post_execute_reass_pkts(struct ipf *ipf,
                         rp->list->frag_list[i].pkt->md.ct_orig_tuple.ipv4  =
                             pkt->md.ct_orig_tuple.ipv4;
                     }
+                    dp_packet_set_rss_hash(rp->list->frag_list[i].pkt, \
+                                dp_packet_get_rss_hash(frag_0->pkt));
                 }
 
-                const struct ipf_frag *frag_0 = &rp->list->frag_list[0];
                 void *l4_frag = dp_packet_l4(frag_0->pkt);
                 void *l4_reass = dp_packet_l4(pkt);
                 memcpy(l4_frag, l4_reass, dp_packet_l4_size(frag_0->pkt));
