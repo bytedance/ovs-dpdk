@@ -81,6 +81,7 @@ struct ct_dpif_dump_state;
 struct ct_dpif_entry;
 struct ct_dpif_tuple;
 struct ct_dpif_timeout_policy;
+struct ct_dpif_zone_stat;
 
 /* 'dpif_ipf_proto_status' and 'dpif_ipf_status' are presently in
  * sync with 'ipf_proto_status' and 'ipf_status', but more
@@ -616,6 +617,9 @@ struct dpif_class {
                      struct ofputil_meter_stats *, uint16_t n_bands);
 
     int (*dpif_ndu_exit)(struct dpif *);
+
+    int (*dpif_ct_stats_show)(struct dpif *, struct ct_dpif_zone_stat *zone_stat, uint16_t *zone);
+
 };
 
 extern const struct dpif_class dpif_netlink_class;

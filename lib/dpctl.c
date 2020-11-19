@@ -1478,7 +1478,7 @@ dpctl_ct_stats_show(int argc, const char *argv[],
     int tot_bkts;
     int lastargc = 0;
 
-    int proto_stats[CT_STATS_MAX];
+    struct ct_dpif_zone_stat stat;
     int tcp_conn_per_states[CT_DPIF_TCPS_MAX_NUM];
     int error;
 
@@ -1503,7 +1503,13 @@ dpctl_ct_stats_show(int argc, const char *argv[],
         return error;
     }
 
-    memset(proto_stats, 0, sizeof(proto_stats));
+    memset(&stat, 0, sizeof(stat));
+    if (!verbose) {
+        error = ct_dpif_stats_show(dpif, &stat, pzone);
+        if (!error)
+            goto show;
+    }
+
     memset(tcp_conn_per_states, 0, sizeof(tcp_conn_per_states));
     error = ct_dpif_dump_start(dpif, &dump, pzone, &tot_bkts);
     if (error) {
@@ -1512,19 +1518,18 @@ dpctl_ct_stats_show(int argc, const char *argv[],
         return error;
     }
 
-    int tot_conn = 0;
     while (!(error = ct_dpif_dump_next(dump, &cte))) {
         ct_dpif_entry_uninit(&cte);
-        tot_conn++;
+        stat.tot_conn++;
         switch (cte.tuple_orig.ip_proto) {
         case IPPROTO_ICMP:
-            proto_stats[CT_STATS_ICMP]++;
+            stat.proto_stats[CT_STATS_ICMP]++;
             break;
         case IPPROTO_ICMPV6:
-            proto_stats[CT_STATS_ICMPV6]++;
+            stat.proto_stats[CT_STATS_ICMPV6]++;
             break;
         case IPPROTO_TCP:
-            proto_stats[CT_STATS_TCP]++;
+            stat.proto_stats[CT_STATS_TCP]++;
             uint8_t tcp_state;
             /* We keep two separate tcp states, but we print just one. The
              * Linux kernel connection tracker internally keeps only one state,
@@ -1535,22 +1540,22 @@ dpctl_ct_stats_show(int argc, const char *argv[],
             tcp_conn_per_states[tcp_state]++;
             break;
         case IPPROTO_UDP:
-            proto_stats[CT_STATS_UDP]++;
+            stat.proto_stats[CT_STATS_UDP]++;
             break;
         case IPPROTO_SCTP:
-            proto_stats[CT_STATS_SCTP]++;
+            stat.proto_stats[CT_STATS_SCTP]++;
             break;
         case IPPROTO_UDPLITE:
-            proto_stats[CT_STATS_UDPLITE]++;
+            stat.proto_stats[CT_STATS_UDPLITE]++;
             break;
         case IPPROTO_DCCP:
-            proto_stats[CT_STATS_DCCP]++;
+            stat.proto_stats[CT_STATS_DCCP]++;
             break;
         case IPPROTO_IGMP:
-            proto_stats[CT_STATS_IGMP]++;
+            stat.proto_stats[CT_STATS_IGMP]++;
             break;
         default:
-            proto_stats[CT_STATS_OTHER]++;
+            stat.proto_stats[CT_STATS_OTHER]++;
             break;
         }
     }
@@ -1561,10 +1566,12 @@ dpctl_ct_stats_show(int argc, const char *argv[],
         dpctl_error(dpctl_p, error, "dumping conntrack entry");
         /* Fall through to show any other info we collected. */
     }
+    ct_dpif_dump_done(dump);
 
-    dpctl_print(dpctl_p, "Connections Stats:\n    Total: %d\n", tot_conn);
-    if (proto_stats[CT_STATS_TCP]) {
-        dpctl_print(dpctl_p, "  TCP: %d\n", proto_stats[CT_STATS_TCP]);
+show:
+    dpctl_print(dpctl_p, "Connections Stats:\n    Total: %d\n", stat.tot_conn);
+    if (stat.proto_stats[CT_STATS_TCP]) {
+        dpctl_print(dpctl_p, "  TCP: %d\n", stat.proto_stats[CT_STATS_TCP]);
         if (verbose) {
             dpctl_print(dpctl_p, "    Conn per TCP states:\n");
             for (int i = 0; i < CT_DPIF_TCPS_MAX_NUM; i++) {
@@ -1577,29 +1584,28 @@ dpctl_ct_stats_show(int argc, const char *argv[],
             }
         }
     }
-    if (proto_stats[CT_STATS_UDP]) {
-        dpctl_print(dpctl_p, "  UDP: %d\n", proto_stats[CT_STATS_UDP]);
+    if (stat.proto_stats[CT_STATS_UDP]) {
+        dpctl_print(dpctl_p, "  UDP: %d\n", stat.proto_stats[CT_STATS_UDP]);
     }
-    if (proto_stats[CT_STATS_UDPLITE]) {
-        dpctl_print(dpctl_p, "  UDPLITE: %d\n", proto_stats[CT_STATS_UDPLITE]);
+    if (stat.proto_stats[CT_STATS_UDPLITE]) {
+        dpctl_print(dpctl_p, "  UDPLITE: %d\n", stat.proto_stats[CT_STATS_UDPLITE]);
     }
-    if (proto_stats[CT_STATS_SCTP]) {
-        dpctl_print(dpctl_p, "  SCTP: %d\n", proto_stats[CT_STATS_SCTP]);
+    if (stat.proto_stats[CT_STATS_SCTP]) {
+        dpctl_print(dpctl_p, "  SCTP: %d\n", stat.proto_stats[CT_STATS_SCTP]);
     }
-    if (proto_stats[CT_STATS_ICMP]) {
-        dpctl_print(dpctl_p, "  ICMP: %d\n", proto_stats[CT_STATS_ICMP]);
+    if (stat.proto_stats[CT_STATS_ICMP]) {
+        dpctl_print(dpctl_p, "  ICMP: %d\n", stat.proto_stats[CT_STATS_ICMP]);
     }
-    if (proto_stats[CT_STATS_DCCP]) {
-        dpctl_print(dpctl_p, "  DCCP: %d\n", proto_stats[CT_STATS_DCCP]);
+    if (stat.proto_stats[CT_STATS_DCCP]) {
+        dpctl_print(dpctl_p, "  DCCP: %d\n", stat.proto_stats[CT_STATS_DCCP]);
     }
-    if (proto_stats[CT_STATS_IGMP]) {
-        dpctl_print(dpctl_p, "  IGMP: %d\n", proto_stats[CT_STATS_IGMP]);
+    if (stat.proto_stats[CT_STATS_IGMP]) {
+        dpctl_print(dpctl_p, "  IGMP: %d\n", stat.proto_stats[CT_STATS_IGMP]);
     }
-    if (proto_stats[CT_STATS_OTHER]) {
-        dpctl_print(dpctl_p, "  Other: %d\n", proto_stats[CT_STATS_OTHER]);
+    if (stat.proto_stats[CT_STATS_OTHER]) {
+        dpctl_print(dpctl_p, "  Other: %d\n", stat.proto_stats[CT_STATS_OTHER]);
     }
 
-    ct_dpif_dump_done(dump);
     dpif_close(dpif);
     return error;
 }

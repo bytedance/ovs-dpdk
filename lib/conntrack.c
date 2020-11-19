@@ -74,6 +74,16 @@ struct zone_limit {
     struct conntrack_zone_limit czl;
 };
 
+struct conntrack_zone_stat {
+    struct ct_dpif_zone_stat stat;
+    int zone;
+};
+
+struct zone_stat {
+    struct hmap_node node;
+    struct conntrack_zone_stat czs;
+};
+
 static bool conn_key_extract(struct conntrack *, struct dp_packet *,
                              ovs_be16 dl_type, struct conn_lookup_ctx *,
                              uint16_t zone);
@@ -455,6 +465,7 @@ conntrack_init(void)
     ovs_mutex_lock(&ct->ct_lock);
     cmap_init(&ct->conns);
     hmap_init(&ct->zone_limits);
+    hmap_init(&ct->zone_stats);
     ct->zone_limit_seq = 0;
     ovs_mutex_unlock(&ct->ct_lock);
 
@@ -578,6 +589,57 @@ zone_limit_delete(struct conntrack *ct, uint16_t zone)
     return 0;
 }
 
+static struct zone_stat *
+zone_stat_create(struct conntrack *ct, int32_t zone)
+    OVS_REQUIRES(ct->ct_lock)
+{
+    struct zone_stat *zs = xzalloc(sizeof(*zs));
+    uint32_t hash = zone_key_hash(zone, ct->hash_basis);
+    zs->czs.zone = zone;
+    hmap_insert(&ct->zone_stats, &zs->node, hash);
+    return zs;
+}
+
+static struct zone_stat *
+zone_stat_lookup(struct conntrack *ct, int32_t zone)
+    OVS_REQUIRES(ct->ct_lock)
+{
+    uint32_t hash = zone_key_hash(zone, ct->hash_basis);
+    struct zone_stat *zs;
+    HMAP_FOR_EACH_IN_BUCKET (zs, node, hash, &ct->zone_stats) {
+        if (zs->czs.zone == zone) {
+            return zs;
+        }
+    }
+    return NULL;
+}
+
+static void
+zone_stat_clean(struct conntrack *ct, struct zone_stat *zs)
+    OVS_REQUIRES(ct->ct_lock)
+{
+    hmap_remove(&ct->zone_stats, &zs->node);
+    free(zs);
+}
+
+static int
+zone_stat_delete(struct conntrack *ct, int32_t zone)
+    OVS_REQUIRES(ct->ct_lock)
+{
+    struct zone_stat *zs = zone_stat_lookup(ct, zone);
+    if (zs) {
+        zone_stat_clean(ct, zs);
+    }
+    return 0;
+}
+
+static int zone_stat_protos[] = {
+    [IPPROTO_TCP] = CT_STATS_TCP,
+    [IPPROTO_UDP] = CT_STATS_UDP,
+    [IPPROTO_ICMP] = CT_STATS_ICMP,
+    [IPPROTO_ICMPV6] = CT_STATS_ICMPV6,
+};
+
 static void
 conn_clean_cmn(struct conntrack *ct, struct conn *conn)
     OVS_REQUIRES(ct->ct_lock)
@@ -605,6 +667,14 @@ conn_clean(struct conntrack *ct, struct conn *conn)
     if (conn->conn_flags & CONN_FLAG_NAT_MASK) {
         uint32_t hash = conn_key_hash(&conn->rev_key, ct->hash_basis);
         cmap_remove(&ct->conns, &conn->rev_key.cm_node, hash);
+    }
+    struct zone_stat *zs = zone_stat_lookup(ct, conn->key.zone);
+    if (zs) {
+        zs->czs.stat.proto_stats[zone_stat_protos[conn->key.nw_proto]] --;
+        zs->czs.stat.tot_conn --;
+        if (!zs->czs.stat.tot_conn) {
+            zone_stat_delete(ct, zs->czs.zone);
+        }
     }
     ovsrcu_postpone(delete_conn, conn);
     atomic_count_dec(&ct->n_conn);
@@ -741,7 +811,7 @@ conn_key_check(struct conntrack *ct, const struct conn_key *key,
 }
 
 static bool
-conn_in_map(struct conntrack *ct, const struct conn_key *key, long long now, 
+conn_in_map(struct conntrack *ct, const struct conn_key *key, long long now,
             struct conn **conn_out)
 {
     uint32_t hash = conn_key_hash(key, ct->hash_basis);
@@ -2547,7 +2617,16 @@ static struct conn *
 new_conn(struct conntrack *ct, struct dp_packet *pkt, struct conn_key *key,
          long long now)
 {
-    return l4_protos[key->nw_proto]->new_conn(ct, pkt, now);
+    struct conn *conn;
+    conn = l4_protos[key->nw_proto]->new_conn(ct, pkt, now);
+    if (OVS_LIKELY(conn)) {
+        struct zone_stat *zs = zone_stat_lookup(ct, key->zone);
+        if (!zs)
+            zs = zone_stat_create(ct, key->zone);
+        zs->czs.stat.proto_stats[zone_stat_protos[key->nw_proto]] ++;
+        zs->czs.stat.tot_conn ++;
+    }
+    return conn;
 }
 
 static void
@@ -2750,6 +2829,31 @@ conntrack_dump_next(struct conntrack_dump *dump, struct ct_dpif_entry *entry)
 int
 conntrack_dump_done(struct conntrack_dump *dump OVS_UNUSED)
 {
+    return 0;
+}
+
+int
+conntrack_ct_stats_show(struct conntrack *ct, struct ct_dpif_zone_stat *zone_stat, uint16_t *zone)
+{
+    struct zone_stat *zs;
+    if (zone) {
+        ovs_mutex_lock(&ct->ct_lock);
+        zs = zone_stat_lookup(ct, *zone);
+        if (zs) {
+            *zone_stat = zs->czs.stat;
+        }
+        ovs_mutex_unlock(&ct->ct_lock);
+    } else {
+        ovs_mutex_lock(&ct->ct_lock);
+        HMAP_FOR_EACH(zs, node, &ct->zone_stats) {
+            for (int i = 0; i < CT_STATS_MAX; i ++) {
+                zone_stat->proto_stats[i] += zs->czs.stat.proto_stats[i];
+            }
+        }
+        ovs_mutex_unlock(&ct->ct_lock);
+        zone_stat->tot_conn = atomic_count_get(&ct->n_conn);
+    }
+
     return 0;
 }
 

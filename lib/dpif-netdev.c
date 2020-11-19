@@ -7493,6 +7493,14 @@ dpif_netdev_ndu_exit(struct dpif *dpif)
     return 0;
 }
 
+static int
+dpif_netdev_ct_stats_show(struct dpif *dpif, struct ct_dpif_zone_stat *zone_stat, uint16_t *zone)
+{
+    struct dp_netdev *dp = get_dp_netdev(dpif);
+    conntrack_ct_stats_show(dp->conntrack, zone_stat, zone);
+    return 0;
+}
+
 const struct dpif_class dpif_netdev_class = {
     "netdev",
     true,                       /* cleanup_required */
@@ -7566,6 +7574,7 @@ const struct dpif_class dpif_netdev_class = {
     dpif_netdev_meter_get,
     dpif_netdev_meter_del,
     dpif_netdev_ndu_exit,
+    dpif_netdev_ct_stats_show,
 };
 
 static void
