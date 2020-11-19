@@ -90,6 +90,8 @@ enum dp_packet_offload_mask {
     /* Offload outer IP CKSUM */
     DEF_OL_FLAG(DP_PACKET_OL_TX_OUTER_IP_CKSUM, PKT_TX_OUTER_IP_CKSUM, 0x8000),
     /* Adding new field requires adding to DP_PACKET_OL_SUPPORTED_MASK. */
+    /*Add TX_IP_CKSUM*/
+    DEF_OL_FLAG(DP_PACKET_OL_TX_IP_CSUM, PKT_TX_IP_CKSUM ,0x40000),
 };
 
 #define DP_PACKET_OL_SUPPORTED_MASK (DP_PACKET_OL_RSS_HASH         | \
@@ -107,7 +109,9 @@ enum dp_packet_offload_mask {
                                      DP_PACKET_OL_TX_OUTER_IPV6    | \
                                      DP_PACKET_OL_TX_OUTER_IPV4    | \
                                      DP_PACKET_OL_TX_TUNNEL_VXLAN  | \
-                                     DP_PACKET_OL_TX_OUTER_IP_CKSUM)
+                                     DP_PACKET_OL_TX_OUTER_IP_CKSUM|\
+                                     DP_PACKET_OL_TX_IP_CSUM)
+
 
 #define DP_PACKET_OL_TX_L4_MASK (DP_PACKET_OL_TX_TCP_CKSUM | \
                                  DP_PACKET_OL_TX_UDP_CKSUM | \
