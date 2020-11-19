@@ -889,3 +889,11 @@ ct_dpif_get_timeout_policy_name(struct dpif *dpif, uint32_t tp_id,
                 dpif, tp_id, dl_type, nw_proto, tp_name, is_generic)
             : EOPNOTSUPP);
 }
+
+int ct_dpif_stats_show(struct dpif *dpif, struct ct_dpif_zone_stat *stat, uint16_t *zone)
+{
+    return (dpif->dpif_class->dpif_ct_stats_show
+            ? dpif->dpif_class->dpif_ct_stats_show(
+                dpif, stat, zone)
+            : EOPNOTSUPP);
+}

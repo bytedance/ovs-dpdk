@@ -120,11 +120,13 @@ enum {
 
 struct ct_dpif_entry;
 struct ct_dpif_tuple;
+struct ct_dpif_zone_stat;
 
 int conntrack_dump_start(struct conntrack *, struct conntrack_dump *,
                          const uint16_t *pzone, int *);
 int conntrack_dump_next(struct conntrack_dump *, struct ct_dpif_entry *);
 int conntrack_dump_done(struct conntrack_dump *);
+int conntrack_ct_stats_show(struct conntrack *ct, struct ct_dpif_zone_stat *stat, uint16_t *zone);
 
 int conntrack_flush(struct conntrack *, const uint16_t *zone);
 int conntrack_flush_tuple(struct conntrack *, const struct ct_dpif_tuple *,
