@@ -68,6 +68,7 @@ if [[ $ret -eq 0 ]]; then
     load_routes
     ovs-nductl -p $newpid -m start2
 else
+    echo "fail to hot-upgrade, new ovs launch fail"
     exit -1
 fi
 
