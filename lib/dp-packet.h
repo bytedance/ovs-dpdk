@@ -778,12 +778,12 @@ dp_packet_batch_size(const struct dp_packet_batch *batch)
     return batch->count;
 }
 
-/* Clear 'batch' for refill. Use dp_packet_batch_refill() to add
+/* Clear 'batch' from 'offset' for refill. Use dp_packet_batch_refill() to add
  * packets back into the 'batch'. */
 static inline void
-dp_packet_batch_refill_init(struct dp_packet_batch *batch)
+dp_packet_batch_refill_prepare(struct dp_packet_batch *batch, size_t offset)
 {
-    batch->count = 0;
+    batch->count = offset;
 };
 
 static inline void
@@ -817,6 +817,10 @@ dp_packet_batch_is_full(const struct dp_packet_batch *batch)
     for (size_t IDX = 0; IDX < dp_packet_batch_size(BATCH); IDX++)  \
         if (PACKET = BATCH->packets[IDX], true)
 
+#define DP_PACKET_BATCH_FOR_EACH_WITH_SIZE(IDX, SIZE, PACKET, BATCH) \
+        for (size_t IDX = 0; IDX < SIZE; IDX++)                         \
+                if (PACKET = BATCH->packets[IDX], true)
+
 /* Use this macro for cases where some packets in the 'BATCH' may be
  * dropped after going through each packet in the 'BATCH'.
  *
@@ -829,8 +833,9 @@ dp_packet_batch_is_full(const struct dp_packet_batch *batch)
  * the 'const' modifier since it should not be modified by
  * the iterator.  */
 #define DP_PACKET_BATCH_REFILL_FOR_EACH(IDX, SIZE, PACKET, BATCH)       \
-    for (dp_packet_batch_refill_init(BATCH), IDX=0; IDX < SIZE; IDX++)  \
-         if (PACKET = BATCH->packets[IDX], true)
+    for (dp_packet_batch_refill_prepare(BATCH, 0), IDX=0; IDX < SIZE; IDX++)  \
+        if (PACKET = BATCH->packets[IDX], true)
+
 
 static inline void
 dp_packet_batch_clone(struct dp_packet_batch *dst,

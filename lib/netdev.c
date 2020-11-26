@@ -841,15 +841,22 @@ netdev_send_prepare_batch(const struct netdev *netdev,
                           struct dp_packet_batch *batch)
 {
     struct dp_packet *packet;
-    size_t i, size = dp_packet_batch_size(batch);
+    size_t batch_cnt = dp_packet_batch_size(batch);
+    bool refill = false;
 
-    DP_PACKET_BATCH_REFILL_FOR_EACH (i, size, packet, batch) {
+    DP_PACKET_BATCH_FOR_EACH_WITH_SIZE (i, batch_cnt, packet, batch) {
         char *errormsg = NULL;
 
         if (netdev_send_prepare_packet(netdev->ol_flags, packet, &errormsg)) {
-            dp_packet_batch_refill(batch, packet, i);
+            if ( OVS_UNLIKELY(refill) ) {
+                dp_packet_batch_refill(batch, packet, i);
+            }
         } else {
             dp_packet_delete(packet);
+            if( !refill ) {
+                dp_packet_batch_refill_prepare(batch, i);
+                refill = true;
+            }
             COVERAGE_INC(netdev_send_prepare_drops);
             VLOG_WARN_RL(&rl, "%s: Packet dropped: %s",
                          netdev_get_name(netdev), errormsg);
