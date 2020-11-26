@@ -31,5 +31,6 @@ int linux_get_ifindex(const char *netdev_name);
 
 void netdev_set_tap_fd(struct netdev *netdev, int fd);
 int netdev_get_tap_fd(struct netdev *netdev);
+void netdev_linux_nsid_set_local(struct netdev *netdev);
 
 #endif /* netdev-linux.h */
