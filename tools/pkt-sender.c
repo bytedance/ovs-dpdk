@@ -28,7 +28,7 @@
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <unistd.h>
-
+#include <emmintrin.h>
 VLOG_DEFINE_THIS_MODULE(pkt_sender);
 
 static char *dev_name;
@@ -64,6 +64,9 @@ static struct classifier neigh_cls;
 static char *corelist;
 static int pktcnt;
 static int timeout;
+static int delay;
+static int sport_ = 32767;
+static bool set_sport = false;
 
 struct route_data {
     /* Copied from struct rtmsg. */
@@ -551,6 +554,18 @@ static void construct_udp_header(struct dp_packet *p, ovs_be16 src,
     }
 }
 
+static void next_sd_port(ovs_be16 *sport, ovs_be16 *dport)
+{
+    (*dport) ++;
+    if (*dport == 0) {
+        (*sport)++;
+        *dport = 1;
+    }
+    if (*sport == 0) {
+        *sport = 1;
+    }
+}
+
 static void make_pkts(void) {
     struct ip_pkt *p;
     struct eth_addr smac;
@@ -596,6 +611,9 @@ static void make_pkts(void) {
     free(saddrs);
     free(masks);
     int pkts = 0;
+    ovs_be16 sport = set_sport ? sport_ : 1;
+    ovs_be16 dport = random() % 65536;
+
     LIST_FOR_EACH(p, node, &pkt_head) {
         dp_packet_init(&p->pkt, p->len);
         struct in_addr addr = {.s_addr = p->ipv4};
@@ -603,13 +621,25 @@ static void make_pkts(void) {
         struct eth_addr dmac;
 
         route_table_lookup4(addr, &gw);
-        neigh_table_lookup4(&gw, &dmac);
+        if (ipv6_addr_is_set(&gw))
+            neigh_table_lookup4(&gw, &dmac);
+        else {
+            struct in6_addr saddr6;
+            in6_addr_set_mapped_ipv4(&saddr6, p->ipv4);
+            neigh_table_lookup4(&saddr6, &dmac);
+        }
+
         construct_eth_header(&p->pkt, &dmac, &smac, ETH_TYPE_IP);
         construct_ip4_header(&p->pkt, saddr, p->ipv4, IPPROTO_UDP);
-        construct_udp_header(&p->pkt, 1234, (random() % 65536));
+        construct_udp_header(&p->pkt, sport, dport);
+        if (!set_sport)
+            next_sd_port(&sport, &dport);
+        else
+            dport = random() % 65536;
         dp_packet_set_size(&p->pkt, p->len);
         pkts ++;
     }
+
 
     struct ovs_list duplist = OVS_LIST_INITIALIZER(&duplist);
     if (pktcnt) {
@@ -629,7 +659,11 @@ static void make_pkts(void) {
                 neigh_table_lookup4(&gw, &dmac);
                 construct_eth_header(&pkt->pkt, &dmac, &smac, ETH_TYPE_IP);
                 construct_ip4_header(&pkt->pkt, saddr, p->ipv4, IPPROTO_UDP);
-                construct_udp_header(&pkt->pkt, 1234, (random() % 65536));
+                construct_udp_header(&pkt->pkt, sport, dport);
+                if (!set_sport)
+                    next_sd_port(&sport, &dport);
+                else
+                    dport = random() % 65536;
                 dp_packet_set_size(&pkt->pkt, p->len);
                 ovs_list_push_back(&duplist, &pkt->node);
                 pkts ++;
@@ -691,6 +725,8 @@ static void parse_options(int argc, char *argv[]) {
         {"core-list", required_argument, NULL, 'c'},
         {"pkt-cnt", required_argument, NULL, 'n'},
         {"timeout", required_argument, NULL, 't'},
+        {"delay", required_argument, NULL, 'd'},
+        {"port", required_argument, NULL, 'p'},
         VLOG_LONG_OPTIONS,
         {NULL, 0, NULL, 0},
     };
@@ -732,12 +768,25 @@ static void parse_options(int argc, char *argv[]) {
         case 't':
             str_to_int(optarg, 10, &timeout);
             break;
+        case 'd':
+            str_to_int(optarg, 10, &delay);
+            break;
+        case 'p':
+            str_to_int(optarg, 10, &sport_);
+            break;
         default:
             abort();
         }
     }
 
     free(short_options);
+}
+
+static inline void _pause(void)
+{
+    int i = 0;
+    while (++i < delay)
+        _mm_pause();
 }
 
 static void get_next_batch(struct dp_packet_batch *batch, struct ip_pkt **p) {
@@ -841,6 +890,7 @@ static void *sender(void *arg) {
             ovsrcu_quiesce();
             lc = 0;
         }
+        _pause();
     }
 
     printf("sender exit\n");
@@ -895,6 +945,8 @@ int main(int argc, char *argv[]) {
             poll_timer_wait_until(now + timeout * 1000);
             VLOG_INFO("Running for %d sec\n", timeout);
         }
+        VLOG_INFO("Delay for %d \n", delay);
+        VLOG_INFO("Sport is %d \n", sport_);
         poll_block();
     }
 
