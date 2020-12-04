@@ -1717,6 +1717,15 @@ netdev_dpdk_vhost_destruct(struct netdev *netdev)
 {
     struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
     char *vhost_id;
+    int ret = 0;
+
+    if (dev->vhost_id) {
+        ret = dpdk_vhost_driver_unregister(dev, dev->vhost_id);
+        if (ret) {
+            VLOG_ERR("%s: Unable to unregister vhost driver for socket '%s'.\n",
+                    netdev->name, dev->vhost_id);
+        }
+    }
 
     ovs_mutex_lock(&dpdk_mutex);
 
@@ -1741,10 +1750,7 @@ netdev_dpdk_vhost_destruct(struct netdev *netdev)
         goto out;
     }
 
-    if (dpdk_vhost_driver_unregister(dev, vhost_id)) {
-        VLOG_ERR("%s: Unable to unregister vhost driver for socket '%s'.\n",
-                 netdev->name, vhost_id);
-    } else if (!(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
+    if (!ret && !(dev->vhost_driver_flags & RTE_VHOST_USER_CLIENT)) {
         /* OVS server mode - remove this socket from list for deletion */
         fatal_signal_remove_file_to_unlink(vhost_id);
     }
