@@ -1227,10 +1227,7 @@ conn_seq_skew_set(struct conntrack *ct, const struct conn *conn_in,
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     struct conn *conn;
-    conn_unlock(&conn_in->lock);
     conn_in_map(ct, &conn_in->key, now, &conn);
-    conn_lock(&conn_in->lock);
-
     if (conn && seq_skew) {
         conn->alg->seq_skew = seq_skew;
         conn->alg->seq_skew_dir = seq_skew_dir;
