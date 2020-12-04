@@ -1298,6 +1298,10 @@ conn_not_found(struct conntrack *ct, struct dp_packet *pkt,
         }
 
         nc = new_conn(ct, pkt, &ctx->key, now);
+        if (OVS_UNLIKELY(!nc)) {
+            COVERAGE_INC(conntrack_full);
+            return nc;
+        }
         memcpy(&nc->key, &ctx->key, sizeof nc->key);
         memcpy(&nc->rev_key, &nc->key, sizeof nc->rev_key);
         conn_key_reverse(&nc->rev_key);
