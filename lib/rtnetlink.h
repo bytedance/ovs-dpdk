@@ -45,6 +45,7 @@ struct rtnetlink_change {
     int mtu;                    /* Current MTU. */
     struct eth_addr mac;
     unsigned int ifi_flags;     /* Flags of network device. */
+    unsigned short ifi_type;    /* type of network device */
 
     /* Network device address status. */
     /* xxx To be added when needed. */

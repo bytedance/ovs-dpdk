@@ -20,11 +20,13 @@
 
 #include <errno.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
+#include <net/if_arp.h>
 
 #include "hash.h"
 #include "netdev.h"
@@ -37,6 +39,7 @@
 #include "rtnetlink.h"
 #include "tnl-ports.h"
 #include "openvswitch/vlog.h"
+#include "socket-util.h"
 
 /* Linux 2.6.36 added RTA_MARK, so define it just in case we're building with
  * old headers.  (We can't test for it with #ifdef because it's an enum.) */
@@ -189,6 +192,31 @@ route_table_reset(void)
     return nl_dump_done(&dump);
 }
 
+static int check_tunnel_if(const char *if_name, bool *tunnel)
+{
+    struct ifreq ifr;
+    int hwaddr_family;
+    int error;
+
+    memset(&ifr, 0, sizeof ifr);
+    ovs_strzcpy(ifr.ifr_name, if_name, sizeof ifr.ifr_name);
+    error = af_inet_ioctl(SIOCGIFHWADDR, &ifr);
+    if (error) {
+        VLOG_ERR("ioctl(SIOCGIFHWADDR) on %s device failed: %s",
+                if_name, ovs_strerror(error));
+        return error;
+    }
+    hwaddr_family = ifr.ifr_hwaddr.sa_family;
+    if (hwaddr_family == ARPHRD_TUNNEL ||  \
+        hwaddr_family == ARPHRD_TUNNEL6 || \
+        hwaddr_family == ARPHRD_IPGRE) {
+        *tunnel = true;
+        return 0;
+    }
+    *tunnel = false;
+    return 0;
+}
+
 /* Return RTNLGRP_IPV4_ROUTE or RTNLGRP_IPV6_ROUTE on success, 0 on parse
  * error. */
 static int
@@ -260,6 +288,13 @@ route_table_parse(struct ofpbuf *buf, struct route_table_msg *change)
                 } else {
                     return 0;
                 }
+            }
+            bool tunnel = false;
+            if (!check_tunnel_if(change->rd.ifname, &tunnel)) {
+                if (tunnel)
+                    change->relevant = false;
+            } else {
+                return 0;
             }
         }
 
@@ -344,6 +379,13 @@ name_table_change(const struct rtnetlink_change *change,
 {
     /* Changes to interface status can cause routing table changes that some
      * versions of the linux kernel do not advertise for some reason. */
+
+    if (change && (change->ifi_type == ARPHRD_TUNNEL || \
+            change->ifi_type == ARPHRD_TUNNEL6 || \
+            change->ifi_type == ARPHRD_IPGRE)) {
+        route_table_valid = true;
+        return;
+    }
     route_table_valid = false;
 
     if (change && change->nlmsg_type == RTM_DELLINK) {
